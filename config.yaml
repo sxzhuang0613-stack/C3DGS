@@ -1,0 +1,124 @@
+# ==========================================
+# 3D Gaussian Splatting Medical Reconstruction Config
+# ==========================================
+
+# ------------------------------------------
+# 0. 空间边界与初始化控制 (Initialization & Bounds) [新增]
+# ------------------------------------------
+num_pts: 50000                # 初始高斯点云数量 (固定常量，杜绝初始化显存溢出)
+bounds: [1.0, 1.0, 1.0]       # [x_bound, y_bound, z_bound] 正数物理边界，自动映射为 [-1, 1], [-1, 1], [-3, 3]
+
+# ------------------------------------------
+# 1. 基础训练控制 (Basic Training Control)
+# ------------------------------------------
+iters: 20000                  # 总迭代次数
+interpolation: true           # 是否开启切片间时空插值 (针对心脏时序运动)
+interpolate_iter: 5000
+
+# ------------------------------------------
+# 1.1 GaussianEvolution (Stage 2)
+# ------------------------------------------
+stage2_iters: 20000
+stage2_slice_training_mode: all_slices    # all_slices \ random_slice
+stage2_sampling_mode: random
+cmr_layout: "STHW"            # ACDC npz 中 cmr 的排列为 [S,T,H,W]
+num_ode_steps: 4              # 连续速度场的 RK4 子步数
+motion_dimension: "2D"        # "2D": 仅平面内运动；"3D": 同时预测受限穿层运动
+# none: 原始全高斯 Neural ODE
+# kernel: 自适应控制点 + 解析核插值（推荐的快速默认方案）
+# mls: 自适应控制点 + 局部 MLS/仿射变形图
+control_deformation_mode: "kernel"
+# 自适应 FPS 在最大未覆盖距离不超过该半径时停止。
+# 坐标若归一化到 [-1,1]，建议先从 0.10--0.15 调试。
+control_coverage_radius: 0.1
+control_min_points: 32
+control_max_points: 5000       # 0 表示不设置上限
+control_neighbors: 8
+control_kernel_bandwidth: 0.0 # 0 表示使用 control_coverage_radius
+control_mls_regularization: 0.0001
+control_knn_chunk_size: 32768
+
+# balanced 对全部非参考 time-slice 组合无放回遍历后重新洗牌。
+stage2_sampling_mode: "balanced"
+stage2_dataset_mode: "val"
+stage2_dataset_name: "acdc"
+
+through_plane_max_displacement: 0.1 # 归一化坐标中的最大穿层位移；仅对 3D 模式生效
+evolution_hidden_dim: 128
+kinematics_depth: 4
+optics_depth: 3
+residual_fourier_bands: 3     # 小 L 限制二维残差的空间频率
+residual_scale: 1.0
+
+kinematics_lr: 0.0001
+optics_lr: 0.00005
+optics_weight_decay: 0.0       # 文章目标中没有额外参数正则项
+stage2_adam_eps: 0.000000000000001
+
+lambda_volume: 0.1            # L_V: (det(F)-1)^2
+lambda_smoothness: 0.01       # L_S: ||grad_x v||_2^2
+lambda_control_anchor: 1.0 # 使选中的控制高斯与其ODE控制轨迹保持一致
+stage2_ssim_weight: 0.0       # 文章主目标仅使用 L1，默认关闭额外 SSIM
+stage2_grad_clip: 0.0          # 默认关闭，保持文章所述优化目标不变
+stage2_save_interval: 1000
+stage2_resume: true
+stage2_skip_existing: true
+stage2_export_motion: false
+stage2_export_dense_flow: false
+dense_flow_chunk_size: 32768
+# 可选的真实运动 Jacobian 折叠屏障；设为 0 保持原文章目标。
+lambda_folding: 0.0
+folding_epsilon: 0.0
+
+# ------------------------------------------
+# 2. 增殖与修剪 (Densification & Pruning)
+# ------------------------------------------
+densify_from_iter: 1000        # 开始增殖的步数
+densify_until_iter: 12500      # 停止增殖的步数 (拓扑结构定型)
+densification_interval: 200   # 增殖操作的间隔步数
+opacity_reset_interval: 2500  # 透明度重置间隔
+opacity_reset_untile_iter: 10000
+
+# [防爆炸核心门槛]: 适配 [1.0, 1.0, 3.0] 物理空间的黄金参数组
+densify_grad_threshold: 0.0005 # 位置梯度门槛 (抬高门槛，过滤多切片联合渲染的假错位噪声)
+clone_scale_threshold: 0.010  # 克隆物理上限 (在宽为2.0的空间里，约等于 1~2 个像素宽度)
+split_scale_threshold: 0.05   # 分裂物理上限 (完美匹配 S0 初始间距，杜绝全体自裂死循环)
+min_opacity: 0.005            # 最小透明度剔除门槛
+max_screen_size: 5            # 屏幕空间畸变剔除上限
+
+# ------------------------------------------
+# 3. 学习率设置 (Learning Rates)
+# ------------------------------------------
+position_lr_init: 0.00016
+position_lr_final: 0.000016
+position_lr_delay_mult: 0.01
+position_lr_max_steps: 30000
+color_lr: 0.0025             
+opacity_lr: 0.05
+scaling_lr: 0.005
+rotation_lr: 0.001
+
+# ------------------------------------------
+# 4. 系统与环境参数 (System & Environment)
+# ------------------------------------------
+output_path: "./output/acdc_experiment"
+random_seed: 42
+
+# ------------------------------------------
+# 5. 测试与检查点管理 (Testing & Checkpoints)
+# ------------------------------------------
+loss_plot_interval: 1000        # 每隔多少步更新一次子损失函数走势图 (保存为 output/.../loss_curves.png)
+reconstruct_interval: 2000     # 每隔多少步重建当前 Case 的所有切片 (开始插帧后将自动包含插帧切片)
+interp_step_size: 0.25          # 重建时切片的采样步长 (0.5 表示在两层真实切片中间插入 1 层插帧，0.25 表示插入 3 层)
+
+eval: true                     # 是否预留测试集进行验证评估
+test_iterations: [7000, 30000] # 触发测试集评估的迭代节点
+save_ply: true                 # 是否开启点云文件 (.ply) 的保存开关
+start_checkpoint: ""           # 填入 .ply 路径则续训/微调，留空 "" 则执行全新初始化
+save_iterations: [10000, 20000, 30000] # 触发保存检查点的节点列表
+render_test: true              # 在测试节点是否渲染并输出测试集的图像
+render_video: true             # 训练结束后，是否渲染动态/插值视角的视频
+save_images: true              # 是否将渲染的对比图 (Render vs GT) 保存到本地
+fps: 30                        # 渲染视频时的帧率设定
+
+
