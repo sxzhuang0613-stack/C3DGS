@@ -1,7 +1,7 @@
 import os
 import torch
 import torch.nn.functional as F
-from Gaussians.GaussianModel import GaussianModel
+from Gaussians.GaussianModel_noop import GaussianModel
 from Dataloader import dataset
 from CostFunctions import l1_loss, ssim, slice_tv_loss, penalize_outside_range, psnr, anisotropic_scale_loss
 from Renderer import render
@@ -15,7 +15,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 
 # ==================== [功能模块 1: 动态自适应子损失函数趋势图] ====================
@@ -188,9 +188,9 @@ def training(args):
             data_dict = {} 
             data_inter = {}
             for k in outputs["t1"].keys():
-                if k == "viewspace_points":
-                    data_dict[k] = [output[k] for output in outputs.values()]
-                elif k in ["visibility_filter", "radii"]:
+                # if k == "viewspace_points":
+                #     data_dict[k] = [output[k] for output in outputs.values()]
+                if k in ["visibility_filter", "radii"]:
                     data_dict[k] = [output[k] for output in outputs.values()]
                 elif k in ["render", "gts", "mask"]:
                     data_dict[k] = torch.stack([output[k] for output in outputs.values()], dim=0)
@@ -237,7 +237,7 @@ def training(args):
                 history_losses_dict[k].append(v)
 
             # 每 100 步后台画图并保存一次
-            plot_interval = getattr(args, "loss_plot_interval", 100)
+            plot_interval = getattr(args, "loss_plot_interval", 500)
             if iter % plot_interval == 0 or iter == args.iters:
                 update_loss_plot(sample_out_dir, history_iters, history_losses_dict)
             # =================================================================
@@ -270,7 +270,7 @@ def training(args):
             #     Gaussians._scaling.clamp_(-10.0, 10.0)
             Gaussians.optimizer.zero_grad(set_to_none=True)
 
-            # 3. control Gaussian or reset opacity
+            # 3. control Gaussian
             if iter < densify_until:
                 with torch.no_grad():
                     if (
@@ -278,24 +278,34 @@ def training(args):
                         and args.densification_interval > 0
                         and iter % args.densification_interval == 0
                     ):
-                        size_threshold = (args.max_screen_size if iter > args.opacity_reset_interval else None)
+                        # size_threshold = (args.max_screen_size if iter > args.opacity_reset_interval else None)
+                        size_threshold = (args.max_screen_size if getattr(args, 'enable_size_pruning', False)
+                                                    and iter > getattr(args, 'size_prune_from_iter', 2500)
+                                                    else None)
+                        # Gaussians.densify_and_prune(
+                        #     max_grad=args.densify_grad_threshold,
+                        #     min_opacity=args.min_opacity,
+                        #     clone_scale_threshold=args.clone_scale_threshold,
+                        #     split_scale_threshold=args.split_scale_threshold,
+                        #     max_screen_size=size_threshold,
+                        # )
                         Gaussians.densify_and_prune(
                             max_grad=args.densify_grad_threshold,
-                            min_opacity=args.min_opacity,
                             clone_scale_threshold=args.clone_scale_threshold,
                             split_scale_threshold=args.split_scale_threshold,
                             max_screen_size=size_threshold,
                         )
 
-                    if (
-                        args.opacity_reset_interval > 0
-                        and (
-                            iter % args.opacity_reset_interval == 0
-                            or iter == args.densify_from_iter
-                        )
-                        and iter < args.opacity_reset_untile_iter
-                    ):
-                        Gaussians.reset_opacity()
+
+                    # if (
+                    #     args.opacity_reset_interval > 0
+                    #     and (
+                    #         iter % args.opacity_reset_interval == 0
+                    #         or iter == args.densify_from_iter
+                    #     )
+                    #     and iter < args.opacity_reset_untile_iter
+                    # ):
+                    #     Gaussians.reset_opacity()
 
             # ========================================================================
 
