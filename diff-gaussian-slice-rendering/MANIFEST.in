@@ -1,0 +1,3 @@
+include LICENSE.md README.md CODE_GUIDE_zh.md BUILD_FIX_zh.md pyproject.toml CMakeLists.txt rasterize_points.h rasterize_points.cu ext.cpp
+recursive-include cuda_rasterizer *.h *.cu
+recursive-include examples *.py
