@@ -4,18 +4,18 @@ import re
 import csv
 import numpy as np
 import torch
-import yaml
 import argparse
 from tqdm import tqdm
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from Gaussians.GaussianModel import GaussianModel
+from Gaussians.GaussianModel_noop import GaussianModel
 from Gaussians.GaussianEvolution import GaussianEvolutionNetwork
 from Dataloader import dataset
 from CostFunctions import l1_loss, ssim
 from Renderer import render
+from config_utils import load_config, setup_runtime, dataset_options, render_options, ssim_options
 
 
 MOTION_CODE_VERSION = "20260917_control_graph_slice_training_modes_v9"
@@ -119,7 +119,7 @@ def find_latest_stage1_ply(case_directories):
     return None
 
 
-def update_loss_plot(out_dir, iters_list, loss_dict):
+def update_loss_plot(out_dir, iters_list, loss_dict, dpi=150):
     """将当前 sample 的全部 Stage 2 损失更新到同一张走势图中。"""
     os.makedirs(out_dir, exist_ok=True)
     plot_path = os.path.join(out_dir, "loss_curves.png")
@@ -157,7 +157,7 @@ def update_loss_plot(out_dir, iters_list, loss_dict):
     if iters_list:
         plt.legend(loc='upper right', frameon=True)
     plt.tight_layout()
-    figure.savefig(temporary_plot_path, dpi=150)
+    figure.savefig(temporary_plot_path, dpi=dpi)
     plt.close(figure)
     os.replace(temporary_plot_path, plot_path)
     return plot_path
@@ -183,7 +183,7 @@ def update_loss_history_csv(out_dir, iters_list, loss_dict):
     return csv_path
 
 
-def prepare_cmr_sequence(cmr, cmr_layout='STHW'):
+def prepare_cmr_sequence(cmr, cmr_layout='STHW', device='cuda'):
     """将 DataLoader 输出统一整理为 [T, S, H, W]。"""
     if cmr.ndim == 5:
         cmr = cmr[0]
@@ -195,40 +195,28 @@ def prepare_cmr_sequence(cmr, cmr_layout='STHW'):
         cmr = cmr.permute(1, 0, 2, 3)
     elif cmr_layout != 'TSHW':
         raise ValueError("cmr_layout 仅支持 'STHW' 或 'TSHW'")
-    return cmr.contiguous().cuda(non_blocking=True)
+    return cmr.contiguous().to(device, non_blocking=True)
 
 
 def build_evolution_network(args):
     return GaussianEvolutionNetwork(
-        hidden_dim=getattr(args, 'evolution_hidden_dim', 128),
-        kinematics_depth=getattr(args, 'kinematics_depth', 4),
-        optics_depth=getattr(args, 'optics_depth', 3),
-        residual_fourier_bands=getattr(args, 'residual_fourier_bands', 3),
-        residual_scale=getattr(args, 'residual_scale', 1.0),
-        motion_dimension=getattr(args, 'motion_dimension', '2D'),
-        through_plane_max_displacement=getattr(
-            args, 'through_plane_max_displacement', 0.1
-        ),
-        transverse_max_log_scale=getattr(args, 'transverse_max_log_scale', 0.7),
-        control_deformation_mode=getattr(
-            args, 'control_deformation_mode', 'kernel'
-        ),
-        control_coverage_radius=getattr(
-            args, 'control_coverage_radius', 0.12
-        ),
-        control_min_points=getattr(args, 'control_min_points', 32),
-        control_max_points=getattr(args, 'control_max_points', 512),
-        control_neighbors=getattr(args, 'control_neighbors', 8),
-        control_kernel_bandwidth=getattr(
-            args, 'control_kernel_bandwidth', 0.0
-        ),
-        control_mls_regularization=getattr(
-            args, 'control_mls_regularization', 1e-4
-        ),
-        control_knn_chunk_size=getattr(
-            args, 'control_knn_chunk_size', 32768
-        ),
-    ).cuda()
+        hidden_dim=args.evolution_hidden_dim,
+        kinematics_depth=args.kinematics_depth,
+        optics_depth=args.optics_depth,
+        residual_fourier_bands=args.residual_fourier_bands,
+        residual_scale=args.residual_scale,
+        motion_dimension=args.motion_dimension,
+        through_plane_max_displacement=args.through_plane_max_displacement,
+        transverse_max_log_scale=args.transverse_max_log_scale,
+        control_deformation_mode=args.control_deformation_mode,
+        control_coverage_radius=args.control_coverage_radius,
+        control_min_points=args.control_min_points,
+        control_max_points=args.control_max_points,
+        control_neighbors=args.control_neighbors,
+        control_kernel_bandwidth=args.control_kernel_bandwidth,
+        control_mls_regularization=args.control_mls_regularization,
+        control_knn_chunk_size=args.control_knn_chunk_size,
+    ).to(args.device)
 
 
 def build_optimizer(evolution_net, args):
@@ -239,14 +227,14 @@ def build_optimizer(evolution_net, args):
     optimizer = torch.optim.Adam([
         {
             'params': kinematics_parameters,
-            'lr': getattr(args, 'kinematics_lr', 1e-4),
+            'lr': args.kinematics_lr,
         },
         {
             'params': evolution_net.optics_trunk.parameters(),
-            'lr': getattr(args, 'optics_lr', 5e-5),
-            'weight_decay': getattr(args, 'optics_weight_decay', 0.0),
+            'lr': args.optics_lr,
+            'weight_decay': args.optics_weight_decay,
         },
-    ], eps=getattr(args, 'stage2_adam_eps', 1e-15))
+    ], eps=args.stage2_adam_eps, betas=tuple(args.adam_betas))
     return optimizer
 
 
@@ -266,7 +254,7 @@ def save_checkpoint(path, evolution_net, optimizer, scheduler, iteration, args,
 
 
 def load_checkpoint(path, evolution_net, optimizer=None, scheduler=None):
-    checkpoint = torch.load(path, map_location='cuda')
+    checkpoint = torch.load(path, map_location=next(evolution_net.parameters()).device, weights_only=False)
     if 'model' not in checkpoint:
         evolution_net.load_state_dict(checkpoint)
         return 0, [], {}
@@ -401,11 +389,11 @@ def export_dense_flow(evolution_net, time_steps, num_slices, height, width,
 
 
 def training(args):
-    set_random_seed(getattr(args, 'random_seed', 42))
+    setup_runtime(args)
+    rendering = render_options(args)
+    similarity = ssim_options(args)
     tqdm.write(f"Motion code version: {MOTION_CODE_VERSION}")
-    slice_training_mode = str(getattr(
-        args, 'stage2_slice_training_mode', 'random_slice'
-    )).lower()
+    slice_training_mode = str(args.stage2_slice_training_mode).lower()
     if slice_training_mode not in ['random_slice', 'all_slices']:
         raise ValueError(
             "stage2_slice_training_mode 仅支持 "
@@ -415,21 +403,21 @@ def training(args):
 
     Dataset = torch.utils.data.DataLoader(
         dataset(
-            mode=getattr(args, 'stage2_dataset_mode', 'val'),
-            datasets=getattr(args, 'stage2_dataset_name', 'acdc'),
+            mode=args.dataset_mode,
+            **dataset_options(args),
             align=False,
             augmentation=False,
         ),
-        batch_size=1, num_workers=0, drop_last=True, pin_memory=True,
+        batch_size=1, num_workers=args.num_workers, pin_memory=args.pin_memory,
     )
 
-    stage2_out_dir = os.path.join(args.output_path, "stage2_experiments")
+    stage2_out_dir = args.stage2_output_path
     os.makedirs(stage2_out_dir, exist_ok=True)
     total_cases = len(Dataset)
 
     for sample_idx, data in enumerate(Dataset):
         # sample_name = get_sample_name(data, sample_idx)
-        sample_name = data['info'][0].split('.')[0]
+        sample_name = os.path.splitext(data['info']['filename'][0])[0]
         case_out_dir = os.path.join(stage2_out_dir, sample_name)
         os.makedirs(case_out_dir, exist_ok=True)
         training_artifact_dir = os.path.join(
@@ -446,14 +434,14 @@ def training(args):
         )
 
         expected_outputs = []
-        if getattr(args, 'stage2_export_motion', False):
+        if args.stage2_export_motion:
             expected_outputs.append(motion_path)
-        if getattr(args, 'stage2_export_dense_flow', False):
+        if args.stage2_export_dense_flow:
             expected_outputs.append(dense_flow_path)
         outputs_complete = expected_outputs and all(
             os.path.exists(path) for path in expected_outputs
         )
-        if getattr(args, 'stage2_skip_existing', True) and outputs_complete:
+        if args.stage2_skip_existing and outputs_complete:
             tqdm.write(f"[{sample_name}] 已存在完整运动结果，跳过。")
             continue
 
@@ -461,17 +449,19 @@ def training(args):
         tqdm.write(f"开始处理 Case [{sample_idx + 1}/{total_cases}]: {sample_name}")
 
         cmr_4d = prepare_cmr_sequence(
-            data['cmr'], cmr_layout=getattr(args, 'cmr_layout', 'STHW')
+            data['cmr'], cmr_layout='STHW', device=args.device
         )
         time_steps, num_slices, height, width = cmr_4d.shape
+        if args.reference_phase != 0:
+            raise ValueError('当前 stage2 以第 0 相位为参考；请将 reference_phase 设为 0')
 
         stage1_case_directories = [
-            os.path.join(args.output_path, sample_name),
+            os.path.join(args.stage1_model_root, sample_name),
         ]
         if 'info' in data:
-            info_name = data['info'][0] if isinstance(data['info'], (list, tuple)) else data['info']
+            info_name = data['info']['filename'][0]
             stage1_case_directories.append(
-                os.path.join(args.output_path, str(info_name))
+                os.path.join(args.stage1_model_root, str(info_name))
             )
         stage1_ply_path = find_latest_stage1_ply(stage1_case_directories)
         if stage1_ply_path is None:
@@ -480,14 +470,15 @@ def training(args):
 
         BaseGaussians = GaussianModel()
         tqdm.write(f"读取第一阶段高斯检查点: {stage1_ply_path}")
-        BaseGaussians.load_ply(stage1_ply_path)
+        BaseGaussians.bounds = args.bounds
+        BaseGaussians.load_ply(stage1_ply_path, legacy_color_policy=args.legacy_color_policy,
+                               device=args.device)
         tqdm.write(f"成功加载第一阶段高斯: {BaseGaussians.get_xyz.shape[0]} 个点。")
 
         base_xyz = BaseGaussians.get_xyz.detach()
         base_scaling = BaseGaussians._scaling.detach()
         base_rotation = BaseGaussians._rotation.detach()
         base_colors = BaseGaussians.get_color.detach()
-        base_opacities = BaseGaussians.get_opacity.detach()
 
         evolution_net = build_evolution_network(args)
         control_count = evolution_net.configure_control_points(base_xyz)
@@ -505,9 +496,9 @@ def training(args):
             image_coordinate_features = evolution_net.build_image_coordinate_features(
                 height, width, base_xyz.device, base_xyz.dtype
             )
-        stage2_iters = getattr(args, "stage2_iters", 20000)
+        stage2_iters = args.stage2_iters
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer_net, T_max=max(1, stage2_iters), eta_min=0.0
+            optimizer_net, T_max=max(1, stage2_iters), eta_min=args.stage2_min_lr
         )
 
         checkpoint_path = os.path.join(
@@ -520,14 +511,14 @@ def training(args):
         start_iteration = 0
         history_iters = []
         history_losses_dict = {}
-        if getattr(args, 'stage2_resume', True) and os.path.exists(checkpoint_path):
+        if args.stage2_resume and os.path.exists(checkpoint_path):
             start_iteration, history_iters, history_losses_dict = load_checkpoint(
                 checkpoint_path, evolution_net, optimizer_net, scheduler
             )
             tqdm.write(f"从第 {start_iteration} 次迭代继续训练。")
 
         loss_plot_path = update_loss_plot(
-            training_artifact_dir, history_iters, history_losses_dict
+            training_artifact_dir, history_iters, history_losses_dict, args.plot_dpi
         )
         if history_iters:
             update_loss_history_csv(
@@ -539,17 +530,17 @@ def training(args):
             range(start_iteration + 1, stage2_iters + 1),
             desc=f"Training motion on {sample_name}", leave=False
         )
-        num_ode_steps = getattr(args, 'num_ode_steps', 4)
-        lambda_volume = getattr(args, 'lambda_volume', 0.1)
-        lambda_smoothness = getattr(args, 'lambda_smoothness', 0.01)
-        lambda_folding = getattr(args, 'lambda_folding', 0.0)
-        lambda_control_anchor = getattr(args, 'lambda_control_anchor', 1.0)
-        folding_epsilon = getattr(args, 'folding_epsilon', 0.0)
-        ssim_weight = getattr(args, 'stage2_ssim_weight', 0.0)
+        num_ode_steps = args.num_ode_steps
+        lambda_volume = args.lambda_volume
+        lambda_smoothness = args.lambda_smoothness
+        lambda_folding = args.lambda_folding
+        lambda_control_anchor = args.lambda_control_anchor
+        folding_epsilon = args.folding_epsilon
+        ssim_weight = args.stage2_ssim_weight
         time_slice_sampler = TimeSliceSampler(
             time_steps,
             num_slices,
-            mode=getattr(args, 'stage2_sampling_mode', 'balanced'),
+            mode=args.stage2_sampling_mode,
             slice_training_mode=slice_training_mode,
         )
 
@@ -606,14 +597,14 @@ def training(args):
                     xyz=evolved['xyz'],
                     covariance=evolved['covariance'],
                     colors=base_colors,
-                    opacities=base_opacities,
+                    **rendering,
                 )
                 pred_image = render_pkg['render'] + image_residual
                 gt_image = cmr_4d[phase_idx, slice_idx]
                 loss_render = loss_render + l1_loss(pred_image, gt_image)
                 if ssim_weight > 0:
                     loss_ssim = loss_ssim + 1.0 - ssim(
-                        pred_image[None, None], gt_image[None, None]
+                        pred_image[None, None], gt_image[None, None], **similarity
                     )
 
             # 两种模式都使用切片平均损失，保持损失尺度和权重一致。
@@ -633,7 +624,7 @@ def training(args):
 
             total_loss.backward()
 
-            grad_clip = getattr(args, 'stage2_grad_clip', 0.0)
+            grad_clip = args.stage2_grad_clip
             if grad_clip and grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(evolution_net.parameters(), max_norm=grad_clip)
             optimizer_net.step()
@@ -656,7 +647,7 @@ def training(args):
                 history_losses_dict[loss_name].append(loss_value)
 
             loss_plot_interval = max(
-                1, int(getattr(args, 'stage2_loss_plot_interval', 1000))
+                1, int(args.stage2_loss_plot_interval)
             )
             update_loss_curve = (
                 iter_i == start_iteration + 1
@@ -665,7 +656,7 @@ def training(args):
             )
             if update_loss_curve:
                 loss_plot_path = update_loss_plot(
-                    training_artifact_dir, history_iters, history_losses_dict
+                    training_artifact_dir, history_iters, history_losses_dict, args.plot_dpi
                 )
                 loss_history_path = update_loss_history_csv(
                     training_artifact_dir, history_iters, history_losses_dict
@@ -694,7 +685,7 @@ def training(args):
                 "S": slice_status,
             })
 
-            save_interval = getattr(args, 'stage2_save_interval', 1000)
+            save_interval = args.stage2_save_interval
             if iter_i % save_interval == 0 or iter_i == stage2_iters:
                 save_checkpoint(
                     checkpoint_path, evolution_net, optimizer_net,
@@ -705,7 +696,7 @@ def training(args):
         if start_iteration >= stage2_iters:
             tqdm.write(f"[{sample_name}] 网络训练已经完成，直接导出运动结果。")
 
-        if getattr(args, 'stage2_export_motion', False):
+        if args.stage2_export_motion:
             export_motion_sequence(
                 evolution_net, base_xyz, base_scaling, base_rotation,
                 time_steps=time_steps, num_ode_steps=num_ode_steps,
@@ -713,13 +704,13 @@ def training(args):
             )
             tqdm.write(f"运动结果已保存至: {motion_path}")
 
-        if getattr(args, 'stage2_export_dense_flow', False):
+        if args.stage2_export_dense_flow:
             export_dense_flow(
                 evolution_net,
                 time_steps=time_steps, num_slices=num_slices,
                 height=height, width=width,
                 num_ode_steps=num_ode_steps,
-                chunk_size=getattr(args, 'dense_flow_chunk_size', 32768),
+                chunk_size=args.dense_flow_chunk_size,
                 save_path=dense_flow_path,
             )
             tqdm.write(f"稠密运动场已保存至: {dense_flow_path}")
@@ -729,15 +720,9 @@ def training(args):
         torch.cuda.empty_cache()
 
 
-def load_config(yaml_path):
-    with open(yaml_path, 'r', encoding='utf-8') as file:
-        config_dict = yaml.safe_load(file)
-    return argparse.Namespace(**config_dict)
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='config.yaml')
+    parser.add_argument('--config', type=str, default='config_train.yaml')
     parser.add_argument(
         '--control-deformation-mode',
         choices=['none', 'kernel', 'mls'],

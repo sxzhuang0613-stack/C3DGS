@@ -98,8 +98,10 @@ class GaussianRasterizationSettings:
         ns = _positive_int(num_slices, "num_slices")
         if isinstance(axis, bool) or not isinstance(axis, numbers.Integral) or axis not in (0, 1, 2):
             raise ValueError("axis must be 0, 1 or 2")
-        if isinstance(slice_idx, bool) or not isinstance(slice_idx, numbers.Integral) or not 0 <= slice_idx < ns:
-            raise ValueError("slice_idx must be an integer in [0,num_slices)")
+        # 连续层位置用于切片间插值；仍拒绝越界和非有限输入。
+        if (isinstance(slice_idx, bool) or not isinstance(slice_idx, numbers.Real)
+                or not math.isfinite(slice_idx) or not 0 <= slice_idx <= ns - 1):
+            raise ValueError("slice_idx must be finite and in [0,num_slices-1]")
         bounds = torch.as_tensor(bounds, dtype=torch.float64)
         if bounds.shape != (3,) or not bool(torch.isfinite(bounds).all()) or not bool((bounds > 0).all()):
             raise ValueError("bounds must contain three positive model-space half-extents")

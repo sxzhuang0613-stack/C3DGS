@@ -1,0 +1,167 @@
+# 训练配置：两个阶段与可选预处理
+# 相对路径以本文件为基准；cuda:0 尊重外部 CUDA_VISIBLE_DEVICES。
+# 保留原实验的损失权重和 12500 步插层起点；max_num_pts 是新增容量上限。
+
+# 运行设备与随机性
+device: "cuda:0"
+random_seed: 42
+
+# 数据来源、病例划分与参考相位
+dataset_name: "acdc"
+dataset_paths: {"acdc": "/home/exouser/Datasets/ACDC/database/dataset_npz", 
+                "mnms": "/home/exouser/Datasets/MnMs/MnM/data_npz",
+                }
+dataset_mode: "all"
+train_fraction: 0.7
+normalization_epsilon: 0.0001
+num_workers: 0
+pin_memory: true
+cmr_layout: "STHW"
+reference_phase: 0
+
+# 归一化模型坐标：XYZ 半边长；旧 PLY 颜色迁移策略
+bounds: [1.0, 1.0, 1.0]
+legacy_color_policy: "strict"
+
+# 固定切片渲染参数（协方差 jitter 单位为模型坐标的平方）
+background: 0.0
+background_weight: 0.01
+kernel_cutoff: 0.001
+cutoff_transition: 2.0
+covariance_jitter: 1.0e-08
+raster_debug: false
+
+# 训练/测试共用的 SSIM 定义，data_range 为归一化强度范围
+ssim_window_size: 5
+ssim_sigma: 1.5
+ssim_k1: 0.01
+ssim_k2: 0.03
+data_range: 1.0
+
+# 输出与模型路径
+output_path: "./output/acdc_experiment"
+stage1_model_root: "./output/acdc_experiment"
+stage2_output_path: "./output/acdc_experiment/stage2_experiments"
+
+# Stage1 训练、恢复与保存
+iters: 20000
+stage1_resume: true
+stage1_skip_existing: true
+warm_start_ply_path: ""
+checkpoint_interval: 1000
+save_ply: true
+save_iterations: [10000, 20000]
+loss_plot_interval: 1000
+reconstruct_interval: 2000
+interp_step_size: 0.25
+status_interval: 10
+plot_dpi: 150
+
+# Stage1 初始化与增殖容量上限
+num_pts: 50000
+max_num_pts: 200000
+intensity_init: 0.6410473958869392
+initial_z_scale: 2.0
+initial_distance_floor: 1.0e-07
+roi_layout: "SHW"
+roi_jitter_factor: 0.5
+
+# Stage1 优化器与位置学习率
+position_lr_init: 0.00016
+position_lr_final: 1.6e-05
+position_lr_max_steps: 30000
+intensity_lr: 0.0025
+scaling_lr: 0.005
+rotation_lr: 0.001
+adam_eps: 1.0e-15
+adam_betas: [0.9, 0.999]
+log_scale_min: -10.0
+log_scale_max: 10.0
+
+# 真实切片采样及空间插层监督
+real_slices_per_iter: 2
+interpolation: true
+interpolate_iter: 12500
+interpolation_probability: 0.5
+interpolation_alpha_min: 0.2
+interpolation_alpha_max: 0.8
+
+# Stage1 损失权重，保持原有效默认值
+lambda_l1: 2.0
+lambda_ssim: 0.25
+lambda_anisotropic: 0.1
+lambda_interp_l1: 1.0
+lambda_interp_ssim: 0.1
+anisotropic_max_ratio: 6.0
+anisotropic_epsilon: 1.0e-06
+
+# 增殖、分裂与可选尺寸剪枝
+densify_from_iter: 1000
+densify_until_iter: 12500
+densification_interval: 200
+densify_grad_threshold: 0.0005
+clone_scale_threshold: 0.01
+split_scale_threshold: 0.05
+split_children: 2
+split_shrink_factor: 0.63
+force_split_factor: 2.5
+enable_size_pruning: false
+size_prune_from_iter: 2500
+max_screen_size: 5.0
+world_prune_factor: 5.0
+
+# Stage2 网络与控制点参数（不改变 motion 算法）
+evolution_hidden_dim: 128
+kinematics_depth: 4
+optics_depth: 3
+residual_fourier_bands: 3
+residual_scale: 1.0
+motion_dimension: "2D"
+num_ode_steps: 4
+through_plane_max_displacement: 0.1
+transverse_max_log_scale: 0.7
+control_deformation_mode: "kernel"
+control_coverage_radius: 0.1
+control_min_points: 32
+control_max_points: 5000
+control_neighbors: 8
+control_kernel_bandwidth: 0.0
+control_mls_regularization: 0.0001
+control_knn_chunk_size: 32768
+
+# Stage2 训练、正则与导出
+stage2_iters: 20000
+stage2_slice_training_mode: "all_slices"
+stage2_sampling_mode: "balanced"
+kinematics_lr: 0.0001
+optics_lr: 5.0e-05
+optics_weight_decay: 0.0
+stage2_adam_eps: 1.0e-15
+stage2_min_lr: 0.0
+lambda_volume: 0.1
+lambda_smoothness: 0.01
+lambda_control_anchor: 1.0
+lambda_folding: 0.0
+folding_epsilon: 0.0
+stage2_ssim_weight: 0.0
+stage2_grad_clip: 0.0
+stage2_save_interval: 1000
+stage2_loss_plot_interval: 1000
+stage2_resume: true
+stage2_skip_existing: true
+stage2_export_motion: false
+stage2_export_dense_flow: false
+dense_flow_chunk_size: 32768
+
+# 仅显式执行 temp.py 时使用；默认不覆盖已有 NPZ
+preprocess_image_path: "/data1/zhuangshuxin/datasets/shengyi_all/cropped/images/cmr"
+preprocess_label_path: "/data1/zhuangshuxin/datasets/shengyi_all/cropped/labels/cmr_Myo_mask"
+preprocess_output_path: "/data1/zhuangshuxin/datasets/shengyi_all/cropCMRnpz"
+preprocess_target_frames: 40
+preprocess_time_axis: 0
+preprocess_normalization: "slice_uint8"
+preprocess_epsilon: 1.0e-08
+preprocess_overwrite: false
+
+# 遗留 flow 接口的外部归一化文件路径
+flow_norm_path: "/data1/zhuangshuxin/codes/MI_prediction/flow_norm.json"

@@ -1,0 +1,48 @@
+# 测试配置：只加载模型评估，不优化参数
+# 相对路径以本文件为基准；cuda:0 尊重外部 CUDA_VISIBLE_DEVICES。
+# 逐病例拟合模型仅能评估有对应 checkpoint 的病例；不代表未见病例泛化。
+
+# 运行设备与随机性
+device: "cuda:0"
+random_seed: 42
+
+# 数据来源、病例划分与参考相位
+dataset_name: "acdc"
+dataset_paths: {"acdc": "/home/exouser/Datasets/ACDC/database/dataset_npz", "mnms": "/home/exouser/Datasets/MnMs/MnM/data_npz"}
+dataset_mode: "val"
+train_fraction: 0.7
+normalization_epsilon: 0.0001
+num_workers: 0
+pin_memory: true
+cmr_layout: "STHW"
+reference_phase: 0
+
+# 归一化模型坐标：XYZ 半边长；旧 PLY 颜色迁移策略
+bounds: [1.0, 1.0, 1.0]
+legacy_color_policy: "strict"
+
+# 固定切片渲染参数（协方差 jitter 单位为模型坐标的平方）
+background: 0.0
+background_weight: 0.01
+kernel_cutoff: 0.001
+cutoff_transition: 2.0
+covariance_jitter: 1.0e-08
+raster_debug: false
+
+# 训练/测试共用的 SSIM 定义，data_range 为归一化强度范围
+ssim_window_size: 5
+ssim_sigma: 1.5
+ssim_k1: 0.01
+ssim_k2: 0.03
+data_range: 1.0
+
+# 仅加载 Stage1 模型；{case} 替换 NPZ 文件主名
+stage1_ply_path: "./output/acdc_experiment/{case}/point_cloud_final.ply"
+
+# 输出与模型路径
+output_path: "./output/evaluation"
+
+# Stage1 测试输出；指标默认使用未截断预测
+save_images: true
+save_arrays: true
+clamp_predictions: false

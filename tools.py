@@ -700,7 +700,7 @@ class MetricCalculator3D:
         gt_sum = torch.sum(gt, dim=(1, 2, 3)).float()
         
         # 计算百分比误差，分母加入 epsilon 防止 gt_sum 为 0 时报错
-        error_percent = (abs(pred_sum - gt_sum) / (gt_sum + self.epsilon))
+        error_percent = (pred_sum - gt_sum) / gt_sum.clamp_min(self.epsilon) * 100.0
 
         
         return error_percent.mean().item()
@@ -769,13 +769,14 @@ class MetricCalculator3D:
             # 同样处理全纯色背景的异常情况
             return None
 
-    def forward(self, logit, gt):
+    def forward(self, logit, gt, foreground_class=1):
         """
         前向计算：计算基础指标，并收集用于全局曲线的数据。
         """
-        pred = self._get_prediction(logit)
-        gt = gt.to(pred.device).type_as(pred)
-        probs = torch.softmax(logit, dim=1)[:, 1, ...]
+        # 多类别标签按指定类别二值化，避免类别编号被当成面积权重。
+        pred = (self._get_prediction(logit) == foreground_class).long()
+        gt = (gt.to(pred.device) == foreground_class).long()
+        probs = torch.softmax(logit, dim=1)[:, foreground_class, ...]
         
         # 1. 记录常规的 Batch 级别指标
         results = {
@@ -790,7 +791,7 @@ class MetricCalculator3D:
             self.history[key].append(value)
 
         # 2. 收集全局 ROC/PR 需要的概率图和标签
-        probs = torch.softmax(logit, dim=1)[:, 1, ...] 
+        probs = torch.softmax(logit, dim=1)[:, foreground_class, ...]
         
         # 【内存优化核心】：
         # 3D 数据极大，如果保存原始 float32 会迅速撑爆内存。

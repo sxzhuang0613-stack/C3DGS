@@ -1,24 +1,11 @@
+"""显式运行的数据转换入口；导入本模块不会访问或覆盖病例文件。"""
+import argparse
 import os
 import numpy as np
-import torch
-import torch.nn.functional as F
-from Gaussians.GaussianModel import GaussianModel
-from Dataloader import dataset
-from CostFunctions import l1_loss, ssim, slice_tv_loss, penalize_outside_range, psnr, anisotropic_scale_loss
-from Renderer import render
-import yaml
-import argparse
-import random
 import nibabel as nib
-from tools import subplots
-from tqdm import tqdm
-import numpy as np
 from PIL import Image
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import pydicom
-
+from tqdm import tqdm
+from config_utils import load_config
 
 
 def overlay_mask(gray_image, mask, save_path, alpha=0.5, color=(255, 0, 0)):
@@ -89,27 +76,6 @@ def overlay_mask(gray_image, mask, save_path, alpha=0.5, color=(255, 0, 0)):
     return out_uint8
 
 
-# Dataset = torch.utils.data.DataLoader(
-#         dataset(mode="train", datasets='shengyi', align=False, augmentation=False),
-#         batch_size=1, 
-#         num_workers=0, 
-#         drop_last=True,
-#         pin_memory=True,
-#     )
-
-# for sample_idx, data in enumerate(Dataset):
-    
-#     # if os.path.exists(os.path.join(r'output/acdc_experiment', f'sample_{sample_idx:03d}')):
-#     #     continue
-#     imgs = data['cmr'][0,:,0]    # initial time step
-#     lbls = data['cmr_lbl']
-#     p_name = data['info'][0].split('.')[0]
-#     imgs[imgs != 1] = 0
-#     out_path = "/data1/zhuangshuxin/codes/3DGS-m/overlay_result.png"
-#     overlay_mask(imgs[-1], lbls[0,-1,0], out_path, alpha=0.5, color=(255, 0, 0))
-pth1 = r'/data1/zhuangshuxin/datasets/shengyi_all/cropped/images/cmr'
-pth2 = r'/data1/zhuangshuxin/datasets/shengyi_all/cropped/labels/cmr_Myo_mask'
-
 def adjust_frames(arr, target_frames=40):
     """将数组第一个维度调整为 target_frames。"""
     T = arr.shape[0]
@@ -133,52 +99,45 @@ def adjust_frames(arr, target_frames=40):
     return arr
 
 
-save = r'/data1/zhuangshuxin/datasets/shengyi_all/cropCMRnpz'
-os.makedirs(save, exist_ok=True)
+def preprocess(args):
+    os.makedirs(args.preprocess_output_path, exist_ok=True)
+    for patient in tqdm(sorted(os.listdir(args.preprocess_image_path))):
+        image_dir = os.path.join(args.preprocess_image_path, patient)
+        label_dir = os.path.join(args.preprocess_label_path, patient)
+        output = os.path.join(args.preprocess_output_path, patient + '.npz')
+        if os.path.exists(output) and not args.preprocess_overwrite:
+            raise FileExistsError(f'已有结果未覆盖：{output}')
+        slices = sorted((f for f in os.listdir(label_dir) if f.endswith('.nii.gz')),
+                        key=lambda f: float(f.removesuffix('.nii.gz')))
+        images, labels, affines, spacings, original_frames = [], [], [], [], []
+        for name in slices:
+            source = nib.load(os.path.join(image_dir, name))
+            label_source = nib.load(os.path.join(label_dir, name))
+            image = np.moveaxis(source.get_fdata(), args.preprocess_time_axis, 0)
+            label = np.moveaxis(label_source.get_fdata(), args.preprocess_time_axis, 0)
+            if image.shape != label.shape:
+                raise ValueError(f'{patient}/{name}: 图像与标签 shape 不一致')
+            original_frames.append(image.shape[0])
+            if args.preprocess_normalization == 'slice_uint8':
+                # 默认保持原有逐切片归一化协议；可显式选择保留浮点原始强度。
+                image = (image - image.min()) / (image.max() - image.min() + args.preprocess_epsilon)
+                image = (image * 255).astype(np.uint8)
+            elif args.preprocess_normalization != 'none':
+                raise ValueError('preprocess_normalization 必须为 slice_uint8 或 none')
+            images.append(adjust_frames(image, args.preprocess_target_frames))
+            labels.append(adjust_frames(label, args.preprocess_target_frames))
+            affines.append(source.affine)
+            spacings.append(source.header.get_zooms())
+        # 保留原 NIfTI 几何；不要将其误认为归一化训练坐标的 affine。
+        np.savez_compressed(
+            output, cmr=np.stack(images), cmr_lbl=np.stack(labels), info=patient,
+            source_affine=np.stack(affines), source_spacing=np.asarray(spacings),
+            source_time_axis=args.preprocess_time_axis, original_frames=np.asarray(original_frames),
+            normalization=args.preprocess_normalization,
+        )
 
-for p in tqdm(sorted(os.listdir(pth1))):
-    ppth1 = os.path.join(pth1, p)
-    ppth2 = os.path.join(pth2, p)
 
-    slcs = [f for f in os.listdir(ppth2) if f.endswith(".nii.gz")]
-    slcs = sorted(
-        slcs,
-        key=lambda x: float(x.replace(".nii.gz", ""))
-    )
-
-    cmrs = []
-    lbls = []
-
-    for s in slcs:
-        img_path = os.path.join(ppth1, s)
-        lbl_path = os.path.join(ppth2, s)
-
-        # ===== CMR =====
-        img = nib.load(img_path).get_fdata()
-
-        vmin = np.min(img)
-        vmax = np.max(img)
-
-        normalized = (img - vmin) / (vmax - vmin + 1e-8)
-        normalized = (normalized * 255).astype(np.uint8)
-
-        # 调整时间维度为40
-        normalized = adjust_frames(normalized, 40)
-
-        # ===== Label =====
-        lbl = nib.load(lbl_path).get_fdata()
-
-        # 调整时间维度为40
-        lbl = adjust_frames(lbl, 40)
-
-        cmrs.append(normalized)
-        lbls.append(lbl)
-
-    data = {
-        'cmr': np.stack(cmrs, axis=0),
-        'cmr_lbl': np.stack(lbls, axis=0),
-        'info': p,
-    }
-
-    spth = os.path.join(save, p + '.npz')
-    np.savez(spth, **data)
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', default='config_train.yaml')
+    preprocess(load_config(parser.parse_args().config))

@@ -1,123 +1,82 @@
-DynamicGaussianRepresentation
+# C3DGS 心脏 MRI 高斯重建
 
-该仓库包含心肌参考相位高斯初始化和文章所述 GaussianEvolution 两阶段流程。
+项目按病例独立优化。Stage1 拟合参考相位的无 opacity、单通道强度三维高斯；Stage2 读取参考高斯，拟合完整序列的演化网络。测试入口仅评估 Stage1，不更新模型。
 
-训练
+## 环境
 
-首先运行参考相位高斯初始化：
+需要 CUDA 版 PyTorch、兼容的 CUDA Toolkit/nvcc、NumPy、PyYAML、plyfile、torchvision、matplotlib、tqdm 和 simple-knn。`temp.py` 额外需要 nibabel；独立使用 `tools.py` 的可视化/指标功能需要 OpenCV、python-pptx、scikit-learn、Pillow。本仓库不自动安装或修改环境。
 
-CUDA_VISIBLE_DEVICES=0 python GetInitialGaussian.py
-
-随后拟合每个序列从参考相位到目标相位的连续速度场与二维低频强度残差：
-
-CUDA_VISIBLE_DEVICES=0 python motionx.py --config config.yaml
-
-Stage 2 默认从已有 motionx_ode_latest.pth 继续训练。若开启运动导出，每个 case 的
-stage2_experiments/<case>/motion_sequence.npz 包含：
-
-reference_xyz：参考相位高斯中心 [N, 3]；
-
-xyz：所有相位的连续高斯轨迹 [T, N, 3]；
-
-displacement：由连续速度场积分得到的参考相位到各相位位移 [T, N, 3]；
-
-jacobian_det：各高斯位置处的局部变形行列式 [T, N]。
-
-同目录下的 dense_flow.npz 可直接用于掩膜传播与应变计算：
-
-flow_pixel：参考相位到各相位的二维像素位移 [T, S, 2, H, W]；
-
-through_plane_normalized：归一化坐标中的穿层位移 [T, S, H, W]。
-
-GaussianEvolution 实现
-
-Gaussians/GaussianEvolutionX.py 使用原始 (x,y,z,t) 坐标和 MLP 预测
-瞬时速度 v(x,t)，以 RK4 从参考相位积分至目标相位，同时积分
-dF/dt=(grad_x v)F。动态协方差按照
-Sigma(t)=F(t) Sigma(0) F(t)^T 更新。二维观测分支只接收截断 Fourier 编码，
-输出与结构渲染结果相加的低频强度残差，并在参考相位强制为零。
-
-运动维度由 config.yaml 控制：
-
-motion_dimension: "2D" 严格令切片法向位移为零；
-
-motion_dimension: "2D" 还会预测正的法向尺度，使准不可压缩约束可以通过
-transverse support expansion 补偿平面内收缩；
-
-motion_dimension: "3D" 同时预测穿层速度，并使用
-through_plane_max_displacement * tanh(v_z) 限制其归一化速度；当归一化时间属于
-[0,1] 时，相应总穿层位移也不超过该幅度。
-
-训练目标与文章保持一致：
-
-L = L_R + 0.1 L_V + 0.01 L_S
-
-其中 L_R 为图像 L1 损失，L_V=(det(F)-1)^2，L_S=||grad v||_2^2。
-
-定制渲染器
-
-GaussianEvolution 直接向渲染器传递预计算的动态协方差。因此合并本仓库中的
-CUDA 修改后，需要在包含完整 third_party/glm 的渲染库目录重新编译：
-
-cd diff-gaussian-rasterization
-pip install -e .
-
-当前仓库仅保存了作者修改过的渲染器文件；编译时仍需使用原工程中未上传的依赖文件。
-
-最小测试
-
-pytest -q tests/test_gaussian_evolution.py
-
-
-nohup env CUDA_VISIBLE_DEVICES=1 PYTHONUNBUFFERED=1 python -u Motion.py > stage2.log 2>&1 < /dev/null &
-
-# Stage 2 控制点高斯演化
-
-文件放置位置：
-
-```text
-DynamicGaussianRepresentation/
-├── motion.py
-└── Gaussians/
-    └── GaussianEvolution.py
-```
-
-## 三种训练路径
+先编译当前渲染扩展（不依赖旧 third_party/glm）：
 
 ```bash
-# 原始全高斯 Neural ODE 消融
-python motion.py --config config.yaml --control-deformation-mode none
-
-# 自适应控制点 + 核传播（推荐默认方案）
-python Motion.py --config config.yaml --control-deformation-mode kernel
-
-# 自适应控制点 + 局部 MLS/仿射变形图
-python motion.py --config config.yaml --control-deformation-mode mls
+cd diff-gaussian-slice-rendering
+python -m pip install --no-build-isolation .
 ```
 
-可从命令行覆盖控制点覆盖半径和邻居数：
+需要当前源码的 API_VERSION=2 二进制；详细安装说明见该目录 README。
+
+## 配置和运行
+
+`config_train.yaml` 包含两个阶段的训练参数和显式预处理参数；`config_test.yaml` 只包含 Stage1 测试所需参数。旧 `config.yaml` 已移除。
+
+首先修改配置中的数据路径、输出路径和 `device`。所有相对外部路径以配置文件所在目录为基准，支持环境变量和 `~`。`device: cuda:0` 表示当前可见设备中的第 0 张卡，代码不会覆盖外部 `CUDA_VISIBLE_DEVICES`。
 
 ```bash
-python motion.py --config config.yaml \
-  --control-deformation-mode mls \
-  --control-coverage-radius 0.12 \
-  --control-neighbors 8
+python GetInitialGaussian.py --config config_train.yaml
+python Motion.py --config config_train.yaml
+python evaluate.py --config config_test.yaml
 ```
 
-## 关键定义
+保留 Stage2 的 CLI 覆盖，例如 `--control-deformation-mode mls`、`--slice-training-mode random_slice`。
 
-- `flow_jacobian` / `flow_jacobian_det`：真实材料点运动 Jacobian，用于拓扑与折叠判断。
-- `support_transform` / `support_volume_ratio`：加入法向尺度后的高斯支撑变换，用于协方差 push-forward 和准不可压缩。
-- 控制点只参数化运动；全部 Stage-1 高斯仍然得到中心、协方差和切片占据并参与渲染。
-- 控制点由覆盖半径停止的 FPS 按病例自适应选择，阶段二训练期间固定不变。
-- `lambda_control_anchor` 约束传播后的控制高斯与其 ODE 控制轨迹一致。
+训练与测试默认都读取 `dataset_mode: val`，保持原病例划分；这是逐病例重建评估，不代表对未见病例的泛化。没有对应 PLY 的病例会明确报错，不会在测试中重新训练。`all/train/val` 继续按排序后的全部病例及 `train_fraction` 选择集合；新增的 `test` 根据 NPZ 的 `original_split` 选择官方测试病例。这两种划分方式不同，不保证 `train/val` 与官方 `test` 互斥。评估入口始终排除无有效标签的病例，`test` 模式也执行相同过滤。
 
-三种传播方式使用不同的 checkpoint 文件名：
+测试的 `stage1_ply_path` 使用 `{case}` 替换 NPZ 文件主名。输出逐切片 L1、PSNR、SSIM 到 `metrics.csv`，可选保存预测数组和固定显示范围的 PNG。默认指标使用未截断预测；`clamp_predictions` 可显式切换。测试配置的归一化、坐标边界和参考相位应与生成 PLY 时一致。
 
-```text
-net_latest_none.pth
-net_latest_kernel.pth
-net_latest_mls.pth
+## 数据契约
+
+当前读取器仅适配 ACDC（`datasets='acdc'`）和 M&Ms（`datasets='mnms'`，也接受 `mm/mms/m&ms`）。配置中的 `dataset_name` 使用 `acdc` 或 `mnms`，`dataset_paths` 已指向 `/home/exouser/Datasets` 下的两个 NPZ 目录，也可在构造读取器时通过 `data_path` 覆盖路径。
+
+NPZ 包含 `cmr: [T,S,H,W]`、`labels: [P,S,H,W]` 和 JSON 字符串 `info`。`dataset(..., dim='3D')` 默认返回完整病例：`cmr: [S,T,128,128]`、`label: [S,P,128,128]`；`dim='2D'` 遍历各病例的所有切片，返回 `cmr: [T,128,128]`、`label: [P,128,128]`。先按病例划分集合，再展开切片。图像按完整病例执行 min–max 归一化，输出为 `[0,1]` 的 float32；标签为 long。仅将 H/W 缩放为 128×128，图像使用双线性插值，标签使用最近邻插值，空标签保留空相位轴。保留全部切片和时间帧，不对 S/T 插值或补齐，因此默认使用 `batch_size=1`。`info.source_spatial_shape` 和 `info.spatial_shape` 记录缩放前后尺寸；原始 JSON 的 affine、spacing 仍描述缩放前的数据。
+
+对外统一类别为 ACDC 定义：`0=背景、1=右室腔、2=左室心肌、3=左室腔`；M&Ms 原始编号 1、3 在读取时交换。`P` 仅包含实际标注相位，ED/ES 对应时间帧位于 `info['time_indices']`，无标签时 `P=0`，不会补成背景。M&Ms 官方标记为 unlabeled 或相位元数据无效的病例也会被测试过滤，即使文件中存在标签数组；全背景标签不视为无标签。其他模式可显式指定 `require_labels=True` 使用同一过滤规则。
+
+输出固定为 `cmr、label、info`。`info` 为字典，包含病例标识、文件名、数据集、原始集合、切片索引（3D 时为 -1）、轴序、标注相位、有效性以及统一类别定义和映射；原始元信息保存在 `info['metadata']` JSON 字符串中，避免其中的 null 和异构字段影响默认 DataLoader 拼接。原始类别定义保留在该 JSON 中。新增数据集时，在读取器的适配位置扩展类别映射、字段和轴序处理，共用后续索引及输出逻辑。
+
+读取器输出轴序固定，训练和评估入口不再依据旧的 `cmr_layout` 配置重复转置。`reference_phase` 默认为 0；Stage2 当前要求参考相位为 0。
+
+`roi_mask` 可选，三维 mask 默认为 `[S,H,W]`，也可用 `roi_layout` 指定其他轴序；`S/D/Z` 为层，`H/Y` 为行，`W/X` 为列。`[M,3]` 点集直接表示模型空间 XYZ。单层 ROI 的层坐标位于模型中心。
+
+`bounds` 为模型空间 XYZ 半边长，初始化和渲染使用同一配置。当前渲染是在无限薄切片平面上采样归一化标量高斯场，不包含 opacity 合成、射线积分或有限层厚积分。
+
+## 保存和恢复
+
+Stage1 每例保存：
+
+- `training_state.pth`：参数、Adam 动量、迭代次数、增殖统计、随机状态和损失历史。
+- `point_cloud_iter_*.ply` / `point_cloud_final.ply`：用于模型交换的参考高斯。
+- `reconstructions/iter_*/`：各次重建快照，避免相互覆盖。
+
+默认从完整训练状态恢复；只在迭代已完成且所需最终产物存在时跳过病例。`warm_start_ply_path` 仅用于模型参数热启动，不表示完整续训。恢复的随机状态要求使用相同数据、设备布局和实验参数；CUDA 原子累加仍可能产生非确定性。
+
+新 PLY 字段为 `x,y,z,intensity,scale_0..2,rot_0..3`；尺度保存为 log 标准差，旋转保存原始 wxyz 四元数。旧灰度 `color_*` 可按 `legacy_color_policy` 迁移，旧 opacity 不再参与模型。两个 stage 均使用此模型格式。
+
+Stage1 默认真实切片无放回均匀采样，支持单层/双层病例。原损失权重不变，插层起点保持原实际行为的 12500 步。`max_num_pts` 默认 200000，是新增的增殖容量限制；不将低强度组织当成低贡献点剪除。
+
+Stage2 的网络、ODE 和控制点传播数学实现保持原样；仅适配数据、配置、PLY 和共享渲染接口。checkpoint 仍按传播方式和切片训练模式分别保存。
+
+## 可选预处理
+
+```bash
+python temp.py --config config_train.yaml
 ```
 
-避免在切换传播方式时误加载语义不同的旧检查点。
+只有显式运行才访问数据。`preprocess_*` 配置控制输入/输出、时间轴、目标帧数和归一化；默认保持原 `slice_uint8` 协议，设为 `none` 可保留原浮点强度。NPZ 同时保存源 affine、spacing、原始帧数等元数据。默认拒绝覆盖已有病例文件。
+
+## 验证
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+测试区分不依赖 GPU 的接口/配置回归和需要 PyTorch/CUDA 扩展的数值测试；依赖不具备时后者跳过。语法和接口检查不能替代 CUDA 编译、GPU 数值验证或完整训练。

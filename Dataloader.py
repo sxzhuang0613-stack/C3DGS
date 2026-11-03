@@ -1,20 +1,13 @@
+import json
 import os
 import random
 import torch
+import torch.nn.functional as TF
 from torch.utils.data import Dataset
 from torchvision import transforms
 import numpy as np
-import nibabel as nib
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-import math
-from decimal import Decimal
 from torchvision.transforms.functional import InterpolationMode
-import torchvision.transforms.functional as FF
-from tools import subplots, load_json,Plot_flows
-import shutil
-import pandas as pd
-from torchvision.transforms import v2
+import torchvision.transforms.functional as F
 
 class data_augmentation():
 
@@ -49,40 +42,79 @@ class data_augmentation():
 
 class dataset(Dataset):
 
-    def __init__(self, mode='train', datasets='shengyi', align = False, augmentation=False):
-        
-
-        self.augmentation = augmentation 
+    def __init__(self, mode='train', datasets='acdc', align=False,
+                 augmentation=False, data_path=None, train_fraction=0.7,
+                 normalization_epsilon=1e-4, config=None, dim='3D', require_labels=False):
+        # 数据集差异集中在此处；后续可增加字段、轴序和类别映射的适配。
+        datasets = datasets.lower()
+        datasets = {'mm': 'mnms', 'mms': 'mnms', 'm&ms': 'mnms'}.get(datasets, datasets)
+        label_maps = {'acdc': [0, 1, 2, 3], 'mnms': [0, 3, 2, 1]}
+        if datasets not in label_maps:
+            raise ValueError('datasets 当前仅支持 acdc 和 mnms（或 mm、mms、m&ms）')
+        if dim not in ('2D', '3D'):
+            raise ValueError('dim 必须为 2D 或 3D')
+        if not 0 <= train_fraction <= 1 or normalization_epsilon <= 0:
+            raise ValueError('train_fraction 必须在 [0,1] 内，normalization_epsilon 必须大于零')
+        self.augmentation = augmentation
         self.datasets = datasets
-        # self.dim = dim
-        self.cmr_cases = []
-        self.tmr_cases = []
-        self.lge_cases = []
-        self.note = {}
-        self.num = 0
-        if datasets == 'shengyi':
-            self.data_pth = r'/data1/zhuangshuxin/datasets/shengyi_all/cropCMRnpz'
-            patients = sorted(os.listdir(self.data_pth))
-
-        elif datasets == 'acdc':
-            self.data_pth = r'/data1/zhuangshuxin/datasets/ACDC/all_npz'
-            patients = sorted(os.listdir(self.data_pth))
-        
-        length = len(patients)
+        self.dim = dim
+        self.label_map = torch.tensor(label_maps[datasets], dtype=torch.long)
+        self.normalization_epsilon = normalization_epsilon
+        if data_path is None:
+            from config_utils import load_config
+            config = config or load_config('config_train.yaml')
+            data_path = config.dataset_paths[datasets]
+        self.data_pth = data_path
+        self.config = config
+        patients = sorted(f for f in os.listdir(data_path) if f.endswith('.npz'))
+        self.case_info = {}
+        for patient in patients:
+            with np.load(os.path.join(data_path, patient), allow_pickle=False) as arrays:
+                info = json.loads(arrays['info'].item())
+            if info['schema']['array_axes'] != {
+                'cmr': ['T', 'Z', 'Y', 'X'], 'labels': ['phase', 'Z', 'Y', 'X'],
+            }:
+                raise ValueError(f'{patient}: 不支持的 NPZ 轴序')
+            self.case_info[patient] = info
+        split = int(len(patients) * train_fraction)
         if mode == 'train':
-            self.patients = patients[:int(length*0.7)]
+            self.patients = patients[:split]
         elif mode == 'val':
-            self.patients = patients[int(length*0.7):]
+            self.patients = patients[split:]
         elif mode == 'all':
             self.patients = patients
-
+        elif mode == 'test':
+            self.patients = [
+                p for p in patients
+                if self.case_info[p]['case']['original_split'].lower() in ('testing', 'test')
+            ]
+        else:
+            raise ValueError('mode 必须为 train、val、test 或 all')
+        # 先划分再过滤，不让标签缺失改变其余病例的集合归属。
+        if require_labels or mode == 'test':
+            self.patients = [p for p in self.patients if self.has_valid_labels(p)]
+        self.samples = []
+        for patient in self.patients:
+            if dim == '2D':
+                slices = self.case_info[patient]['processing']['output']['cmr_shape'][1]
+                self.samples.extend((patient, s) for s in range(slices))
+            else:
+                self.samples.append((patient, None))
         print(f'{len(self.patients)} cardiac cases.')
+
+    def has_valid_labels(self, patient):
+        info = self.case_info[patient]
+        annotation, case = info['annotation'], info['case']
+        phases = info['processing']['output']['labels_shape'][0]
+        return (phases > 0 and annotation.get('has_labels', True)
+                and case.get('official_label_status', 'labeled') == 'labeled'
+                and annotation.get('phase_metadata_valid', True))
 
     def normalize_data(self, img_np, mode='cmr'):
 
         cmin = torch.min(img_np)
         cmax = torch.max(img_np)
-        img_np = (img_np - cmin) / (cmax- cmin + 0.0001)
+        img_np = (img_np - cmin) / (cmax - cmin + self.normalization_epsilon)
 
         if mode == 'tmr':
             if len(img_np.shape) == 3:
@@ -116,38 +148,66 @@ class dataset(Dataset):
         return Data
 
     def __len__(self):
-
-        # length = []
-        # length = max([len(self.cmr_cases)])
-        return len(self.patients)
+        return len(self.samples)
 
 
     def get_data(self, idx):
-        Patient = self.patients[idx]
-        Data = np.load(os.path.join(self.data_pth, Patient))
-        # ids = Data['info']      # [ed, es]
-        
-        # 基础信息必定存在
-        data = {'info': Patient}
-
-        # 动态加载图像 (Images)
-        if 'cmr' in Data:
-            # data['cmr'] = self.normalize_data(torch.Tensor(Data['cmr']))[:,ids[0]-1:ids[1]]
-            data['cmr'] = self.normalize_data(torch.Tensor(Data['cmr']))
-        if 'tmr' in Data:
-            data['tmr'] = self.normalize_data(torch.Tensor(Data['tmr']), mode='tmr')
-        if 'lge' in Data:
-            data['lge'] = self.normalize_data(torch.Tensor(Data['lge']))
-
-        # 动态加载标签 (Labels)
-        if 'cmr_lbl' in Data:
-            data['cmr_lbl'] = torch.Tensor(Data['cmr_lbl'])
-        if 'tmr_lbl' in Data:
-            data['tmr_lbl'] = torch.Tensor(Data['tmr_lbl'])
-        if 'lge_lbl' in Data:
-            data['lge_lbl'] = torch.Tensor(Data['lge_lbl'])
-
-        return data
+        patient, slice_index = self.samples[idx]
+        metadata = self.case_info[patient]
+        annotation = metadata['annotation']
+        with np.load(os.path.join(self.data_pth, patient), allow_pickle=False) as arrays:
+            cmr = torch.from_numpy(arrays['cmr']).float()
+            label = torch.from_numpy(arrays['labels'])
+        time_indices = torch.tensor(annotation['time_indices'], dtype=torch.long)
+        if (cmr.ndim != 4 or label.ndim != 4 or cmr.shape[1:] != label.shape[1:]
+                or label.shape[0] != len(time_indices)
+                or label.shape[0] != len(annotation['phase_names'])):
+            raise ValueError(f'{patient}: 图像、标签形状或标注相位信息不一致')
+        if not torch.isfinite(cmr).all() or cmr.numel() == 0:
+            raise ValueError(f'{patient}: cmr 为空或含非有限值')
+        if ((time_indices < 0) | (time_indices >= cmr.shape[0])).any():
+            raise ValueError(f'{patient}: 标注时间索引超出图像帧范围')
+        if label.numel() and ((label < 0) | (label > 3) | (label != label.long())).any():
+            raise ValueError(f'{patient}: 标签必须为 0、1、2、3')
+        source_spatial_shape = tuple(cmr.shape[-2:])
+        output_size = (128, 128)
+        # 仅缩放 H/W；先处理完整病例，使 2D 与 3D 的对应像素一致。
+        cmr = self.normalize_data(cmr)
+        label = self.label_map[label.long()]
+        if source_spatial_shape != output_size:
+            cmr = TF.interpolate(cmr, size=output_size, mode='bilinear', align_corners=False)
+            # 最近邻保持离散类别；空相位轴单独处理，不生成伪标签。
+            if label.shape[0]:
+                label = TF.interpolate(label.float(), size=output_size, mode='nearest').long()
+            else:
+                label = label.new_empty((0, label.shape[1], *output_size))
+        cmr = cmr.clamp(0, 1).permute(1, 0, 2, 3)
+        label = label.permute(1, 0, 2, 3)
+        if slice_index is not None:
+            cmr, label = cmr[slice_index], label[slice_index]
+        info = {
+            'patient_id': metadata['case'].get(
+                'patient_id', metadata['case'].get('case_id', os.path.splitext(patient)[0])),
+            'filename': patient,
+            'dataset': self.datasets,
+            'original_split': metadata['case']['original_split'],
+            'slice_index': -1 if slice_index is None else slice_index,
+            'cmr_layout': 'THW' if self.dim == '2D' else 'STHW',
+            'label_layout': 'PHW' if self.dim == '2D' else 'SPHW',
+            'source_spatial_shape': torch.tensor(source_spatial_shape),
+            'spatial_shape': torch.tensor(output_size),
+            'time_indices': time_indices,
+            'phase_names': annotation['phase_names'],
+            'has_labels': label.shape[-3] > 0,
+            'valid_labels': self.has_valid_labels(patient),
+            'label_definitions': {'0': 'background', '1': 'right_ventricular_cavity',
+                                  '2': 'left_ventricular_myocardium',
+                                  '3': 'left_ventricular_cavity'},
+            'label_mapping': self.label_map.clone(),
+            # 原始 JSON 含异构字段和 null；保留为字符串，兼容默认 batch 拼接。
+            'metadata': json.dumps(metadata, ensure_ascii=False),
+        }
+        return {'cmr': cmr.contiguous(), 'label': label.contiguous(), 'info': info}
 
     def get_flow_data(self,idx, dim):
         # cases = self.cases[idx]
@@ -156,7 +216,7 @@ class dataset(Dataset):
             # img, gt = self.load_data(Case, self.cmr_pth, self.cmrgt_pth)
             flows = self.load_data(Case, self.flow_pth)
             if self.augmentation:
-                flows = FF.rotate(flows, angle=self.angle, interpolation=InterpolationMode.BILINEAR)
+                flows = F.rotate(flows, angle=self.angle, interpolation=InterpolationMode.BILINEAR)
 
             patient = Case.split('/')[0]
             slices = Case.split('/')[1]
@@ -170,7 +230,8 @@ class dataset(Dataset):
             patient = list(Case.keys())[0]
             slcs = [os.path.join(patient, s) for s in Case[patient]]
             flowsxy = self.load_data(slcs, self.flow_pth)
-            flow_norm = torch.Tensor(load_json(r'/data1/zhuangshuxin/codes/MI_prediction/flow_norm.json'))
+            from tools import load_json
+            flow_norm = torch.tensor(load_json(self.config.flow_norm_path))
             if flowsxy.shape[0] == flow_norm.shape[0]:
                 flowsxy = flowsxy / flow_norm[:, None, None, None, None]
             S, T, C, H, W = flowsxy.shape
@@ -192,8 +253,8 @@ class dataset(Dataset):
                     flowsxy = flowsxy[:,:14]
 
             if self.augmentation:
-                flowsx = FF.rotate(flowsxy[:,:,0], angle=self.angle, interpolation=InterpolationMode.BILINEAR)
-                flowsy = FF.rotate(flowsxy[:,:,1], angle=self.angle, interpolation=InterpolationMode.BILINEAR)
+                flowsx = F.rotate(flowsxy[:,:,0], angle=self.angle, interpolation=InterpolationMode.BILINEAR)
+                flowsy = F.rotate(flowsxy[:,:,1], angle=self.angle, interpolation=InterpolationMode.BILINEAR)
                 flowsxy = torch.stack([flowsx, flowsy], dim=2)
             data = {
                     'flowsxy': flowsxy,
@@ -216,67 +277,12 @@ def fix_len(arr):
     pad = np.repeat(arr[-1:], 40 - n, axis=0)
     return np.concatenate([arr, pad], axis=0)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
+    # 测试loader调用和循环
+    from config_utils import load_config
+    config = load_config('config_train.yaml')
+    loader = torch.utils.data.DataLoader(dataset())
 
-    Dataset = torch.utils.data.DataLoader(
-        dataset(mode="val", datasets='shengyi', align=False, augmentation=False),
-        batch_size=1, 
-        num_workers=0, 
-        drop_last=True,
-        pin_memory=True,
-    )
-    
-    for sample_idx, data in enumerate(Dataset):
-            
-        # if os.path.exists(os.path.join(r'output/acdc_experiment', f'sample_{sample_idx:03d}')):
-        #     continue
-        imgs = data['cmr'][0,:,0].cuda()    # initial time step
-        lbls = data['cmr_lbl'].cuda()
-        p_name = data['info'][0].split('.')[0]
-    # pth1 = r'/data1/zhuangshuxin/datasets/shengyi_all/cropped/images/cmr'
-    # pth2 = r'/data1/zhuangshuxin/datasets/shengyi_all/cropped/labels/cmr_Myo_mask'
-
-    # for p in tqdm(sorted(os.listdir(pth2))):
-    #     slcs = os.listdir(os.path.join(pth2,p))
-    #     imgs = [nib.load(os.path.join(pth1,p,f)).get_fdata() for f in slcs]
-    #     lbls = [nib.load(os.path.join(pth2,p,f)).get_fdata() for f in slcs]
-    #     imgs = [fix_len(a) for a in imgs]
-    #     lbls = [fix_len(a) for a in lbls]
-
-
-    #     data = {'cmr':np.array(imgs),
-    #             'cmr_lbl':np.array(lbls),
-    #             'info': p,
-    #             }
-    #     save = r'/data1/zhuangshuxin/datasets/shengyi_all/crop_cmr_npz'
-    #     spth = os.path.join(save, p+'.npz')
-    #     np.savez(spth, **data)  
-
-    # pth = r'/data1/zhuangshuxin/codes/MI_prediction_v/CMR_Flows/BI_PEI_YUN_041Y/-26.7484.nii.gz'
-    # # load nii
-    # flow = torch.Tensor(nibabel.load(pth).get_fdata())
-    # rgbs = Plot_flows(flow)
-    # subplots(rgbs, color=True)
-    # print(flow.shape)
-
-    # train_dataset = torch.utils.data.DataLoader(
-    #         dataset(mode="train", datasets='shengyi', align=False, augmentation=False),
-    #         batch_size=1, 
-    #         num_workers=0, 
-    #         drop_last=True,
-    #         pin_memory=True,
-    #     )
-
-    
-    # for data in tqdm(train_dataset):
-         
-    #     a = data['cmr']
-    #     b = data['tmr']
-    #     c = data['lge']
-    #     d = data['cmr_lbl']
-    #     e = data['tmr_lbl'] 
-    #     f = data['lge_lbl']
-
-    #     # subplots(f)
-    #     pass
-
+    for i, data in enumerate(loader):
+        a = 1
+        # print(i, data['cmr'].shape, data['label'].shape, data['info'])

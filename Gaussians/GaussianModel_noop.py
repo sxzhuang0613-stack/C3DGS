@@ -190,8 +190,6 @@ class GaussianModel:
                 lr = self.xyz_scheduler_args(iteration)
                 param_group['lr'] = lr
                 return lr
-
-
     
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}

@@ -1,7 +1,5 @@
 
 import torch
-import math
-import torch.nn.functional as F
 from diff_gaussian_slice_rendering import rasterize_gaussians, GaussianRasterizationSettings
 
 
@@ -19,41 +17,34 @@ def covariance_to_vector(covariance):
 
 def render(Gaussians, img_size, slice_idx, axis, num_slices,
            xyz=None, colors=None, opacities=None, scales=None,
-           rotations=None, covariance=None):
+           rotations=None, covariance=None, bounds=None, raster_options=None):
 
-    device = Gaussians.get_xyz.device
-    dtype = Gaussians.get_xyz.dtype
     h, w = img_size
 
     settings = GaussianRasterizationSettings.from_axis(
                     image_height=h,
                     image_width=w,
-                    axis=2,
+                    axis=axis,
                     slice_idx=slice_idx,
                     num_slices=num_slices,
-                    bounds=(1.0, 1.0, 1.0),
+                    bounds=bounds if bounds is not None else getattr(Gaussians, "bounds", (1., 1., 1.)),
+                    **(raster_options or {}),
                 )
 
     xyz = Gaussians.get_xyz if xyz is None else xyz
     colors = Gaussians.get_color if colors is None else colors
 
+    # 两种协方差参数化互斥，不能向新接口传空尺度占位。
+    parameters = {}
     if covariance is None:
-        scales = Gaussians.get_scaling if scales is None else scales
-        rotations = Gaussians.get_rotation if rotations is None else rotations
-        covariance_precomp = torch.empty(0, dtype=dtype, device=device)
+        parameters['scales'] = Gaussians.get_scaling if scales is None else scales
+        parameters['rotations'] = Gaussians.get_rotation if rotations is None else rotations
     else:
-        # GaussianEvolution 直接产生 Sigma(t)，避免再次分解为尺度与四元数。
-        covariance_precomp = covariance_to_vector(covariance).contiguous()
-        scales = torch.empty(0, dtype=dtype, device=device)
-        rotations = torch.empty(0, dtype=dtype, device=device)
+        parameters['cov3Ds_precomp'] = covariance_to_vector(covariance).contiguous()
 
     rendered_image, radii, weight_sum = rasterize_gaussians(
-                means3D=xyz,
-                intensities=colors,
-                raster_settings=settings,
-                scales=scales,
-                rotations=rotations,
-            )
+        means3D=xyz, intensities=colors, raster_settings=settings, **parameters
+    )
 
     return {"render": rendered_image[0],
             "visibility_filter" : radii > 0,
