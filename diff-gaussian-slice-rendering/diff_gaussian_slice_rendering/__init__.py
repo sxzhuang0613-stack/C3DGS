@@ -1,4 +1,4 @@
-"""Differentiable scalar Gaussian fields sampled on fixed affine slice planes.
+"""Differentiable additive Gaussian fields with analytic Gaussian slice response.
 
 Public outputs: image [1,H,W], radii [N], weight_sum [1,H,W].
 Only image is differentiable. Geometry and settings are fixed observations.
@@ -6,6 +6,7 @@ Only image is differentiable. Geometry and settings are fixed observations.
 from dataclasses import dataclass, replace
 import math
 import numbers
+import warnings
 import torch
 from torch import nn
 from torch.autograd.function import once_differentiable
@@ -55,38 +56,65 @@ def _plane_matrix(value):
 
 # Settings 是固定观测条件，不是可学习参数集合。
 # frozen 防止字段重新赋值，但 Tensor 内容仍可原位改变；forward 还会另存独立矩阵快照。
-# background_weight=tau 是背景伪样本权重，不是逐 Gaussian opacity。
+# background_weight 仅保留旧 Python 构造兼容性，不进入 native 或渲染公式。
 @dataclass(frozen=True)
 class GaussianRasterizationSettings:
     image_height: int
     image_width: int
     slice_to_world: torch.Tensor
     background: float = 0.0
-    background_weight: float = 0.01
+    background_weight: float = None
     kernel_cutoff: float = 0.001
     debug: bool = False
     # Width in squared Mahalanobis distance Q; zero reproduces v1.1 hard cutoff.
     cutoff_transition: float = 2.0
     # Additive covariance diagonal, in squared model-coordinate units.
     covariance_jitter: float = 1e-8
+    response_mode: str = "point"
+    psf_sigma: float = 0.0
+    # 可选模型空间一倍标准差位移；用于非等比坐标变换，非可学习属性。
+    psf_std_vector: torch.Tensor = None
 
     # 集中校验标量范围与矩阵约定，三个几何入口最终都会执行这里。
     # transition 的单位是 Mahalanobis 平方距离 Q，必须小于 Qmax。
     def __post_init__(self):
         for name in ("image_height", "image_width"):
             object.__setattr__(self, name, _positive_int(getattr(self, name), name))
-        for name in ("background", "background_weight", "kernel_cutoff", "cutoff_transition", "covariance_jitter"):
+        if isinstance(self.psf_sigma, torch.Tensor) and self.psf_sigma.requires_grad:
+            raise ValueError("psf_sigma is fixed acquisition geometry; gradients are not supported")
+        for name in ("background", "kernel_cutoff", "cutoff_transition", "covariance_jitter", "psf_sigma"):
             v = float(getattr(self, name))
             if not math.isfinite(v):
                 raise ValueError(f"{name} must be finite")
             object.__setattr__(self, name, v)
-        if self.background_weight <= 0 or not 0 < self.kernel_cutoff < 1:
-            raise ValueError("background_weight > 0 and 0 < kernel_cutoff < 1 are required")
+        if self.background_weight is not None:
+            warnings.warn("background_weight is deprecated and ignored by additive rendering", DeprecationWarning, stacklevel=2)
+        if not 0 < self.kernel_cutoff < 1:
+            raise ValueError("0 < kernel_cutoff < 1 is required")
         if not 0 <= self.cutoff_transition < -2 * math.log(self.kernel_cutoff):
             raise ValueError("cutoff_transition must be in [0, -2 log(kernel_cutoff))")
         if self.covariance_jitter < 0:
             raise ValueError("covariance_jitter must be nonnegative")
         object.__setattr__(self, "slice_to_world", _plane_matrix(self.slice_to_world))
+        if self.response_mode not in ("point", "gaussian") or self.psf_sigma < 0:
+            raise ValueError("response_mode must be point/gaussian and psf_sigma nonnegative")
+        if self.psf_std_vector is not None:
+            if self.psf_sigma != 0:
+                raise ValueError("supply psf_sigma or psf_std_vector, not both")
+            vector = _fixed_tensor(self.psf_std_vector, (3,), "psf_std_vector")
+        else:
+            vector = self.psf_sigma * self.slice_to_world[:3, 2]
+        if self.response_mode == "point" and bool((vector != 0).any()):
+            raise ValueError("nonzero PSF requires response_mode='gaussian'")
+        if self.psf_std_vector is not None:
+            object.__setattr__(self, "psf_std_vector", vector)
+
+    @property
+    def psf_vector(self):
+        """固定模型空间一倍标准差位移；保留用户原始 sigma 及表达方式。"""
+        if self.psf_std_vector is not None:
+            return self.psf_std_vector
+        return self.psf_sigma * self.slice_to_world[:3, 2]
 
     # 无 DICOM 时的三轴便捷入口，仅在 Python 生成矩阵，不向 CUDA 传 axis。
     # 模型空间为以零为中心、半边长 bounds 的盒子；这不是自动恢复真实患者坐标。
@@ -120,7 +148,8 @@ class GaussianRasterizationSettings:
     # 若几何标签不足，不把缺失的三维位置静默猜成 axis=2；应显式用 from_axis 或已知矩阵。
     @classmethod
     def from_dicom(cls, dicom_ds, *, model_from_patient=None, frame_index=None,
-                   pixel_to_source=None, image_height=None, image_width=None, **kwargs):
+                   pixel_to_source=None, image_height=None, image_width=None,
+                   psf_sigma_mm=None, **kwargs):
         """Build geometry in LPS mm, optionally transformed into model space.
 
         Supports classic single-frame and enhanced per-frame/shared groups.
@@ -173,14 +202,27 @@ class GaussianRasterizationSettings:
         t[:3, 1] = row_dir * spacing[0]  # increasing row uses row spacing
         t[:3, 3] = ipp                  # first pixel CENTER, not corner
         t = _plane_matrix(t)
+        psf_vector = None
+        if psf_sigma_mm is not None:
+            if 'psf_std_vector' in kwargs or 'psf_sigma' in kwargs:
+                raise ValueError("psf_sigma_mm cannot be combined with model-space PSF parameters")
+            sigma_mm = float(psf_sigma_mm)
+            if not math.isfinite(sigma_mm) or sigma_mm < 0:
+                raise ValueError("psf_sigma_mm must be finite and nonnegative")
+            psf_vector = sigma_mm * t[:3, 2]
         # 患者 LPS mm -> 模型坐标的显式仿射。只变换切片；Gaussian 均值/协方差由上层同步变换。
         # 非等比缩放或 shear 后重新由面内轴求法向，不能直接使用旧法向的普通向量变换结果。
         if model_from_patient is not None:
             transform = _fixed_tensor(model_from_patient, (4, 4), "model_from_patient")
             if not torch.equal(transform[3], torch.tensor([0.,0.,0.,1.], dtype=transform.dtype)) or abs(float(torch.linalg.det(transform[:3,:3]))) == 0:
                 raise ValueError("model_from_patient must be an invertible affine")
+            if psf_vector is not None:
+                # 物理积分位移按 M 变换，不能用 M^-T 变换的几何法向替代。
+                psf_vector = transform[:3, :3] @ psf_vector
             t = _plane_matrix(transform @ t)  # recompute normal after nonuniform scale/shear
         h, w = int(ds.Rows), int(ds.Columns)
+        if psf_vector is not None:
+            kwargs['psf_std_vector'] = psf_vector
         result = cls(h, w, t, **kwargs)
         out_h = h if image_height is None else _positive_int(image_height, "image_height")
         out_w = w if image_width is None else _positive_int(image_width, "image_width")
@@ -209,7 +251,7 @@ class GaussianRasterizationSettings:
 def _require_extension():
     if _C is None:
         raise RuntimeError("CUDA extension is unavailable; build this source package first. " + str(_extension_error))
-    if getattr(_C, "API_VERSION", None) != 2:
+    if getattr(_C, "API_VERSION", None) != 3:
         raise RuntimeError("Loaded an old _C_G3D binary. Remove the old build/binary and rebuild this package.")
 
 
@@ -225,17 +267,18 @@ class _RasterizeGaussians(torch.autograd.Function):
         # 转换后 clone，确保 backward 使用与 forward 相同的数值与设备上的矩阵快照。
         # 不能在 backward 中重新从外部 Settings 读取可能已被更改的 Tensor。
         affine = settings.slice_to_world.to(device=means.device, dtype=torch.float32).contiguous().clone()
+        psf = settings.psf_vector.to(device=means.device, dtype=torch.float32).contiguous().clone()
         args = (settings.image_height, settings.image_width, settings.background,
-                settings.background_weight, settings.kernel_cutoff,
+                settings.kernel_cutoff,
                 settings.cutoff_transition, settings.covariance_jitter, settings.debug)
         n, image, radii, geom, binning, imgstate, weights = _C.rasterize_gaussians(
-            means, intensities, scales, rotations, covariance, affine, *args)
+            means, intensities, scales, rotations, covariance, affine, psf, *args)
         ctx.args, ctx.instances = args, n
         ctx.precomputed = covariance.ndim == 2
         # 保存 Tensor 会启用 PyTorch 的版本检查，防止反向前原位修改模型输入而悄悄产生错误梯度。
         # 同次前向的缓存由 ctx 持有，其存储在反向结束前保持有效。
         ctx.save_for_backward(means, intensities, scales, rotations, covariance,
-                              affine, geom, binning, imgstate)
+                              affine, psf, geom, binning, imgstate)
         # 半径与权重和仅作诊断。本版本没有 weight_sum 的独立反向传播路径。
         # set_materialize_grads(False) 允许未用输出的上游梯度保持 None，而不是分配全零大图。
         ctx.mark_non_differentiable(radii, weights)
@@ -249,9 +292,9 @@ class _RasterizeGaussians(torch.autograd.Function):
     def backward(ctx, grad_image, _grad_radii, _grad_weights):
         if grad_image is None:
             return (None,) * 6
-        means, intensities, scales, rotations, cov, affine, geom, binning, imgstate = ctx.saved_tensors
+        means, intensities, scales, rotations, cov, affine, psf, geom, binning, imgstate = ctx.saved_tensors
         dm, dc, ds, dr, dS = _C.rasterize_gaussians_backward(
-            means, intensities, scales, rotations, cov, affine, *ctx.args,
+            means, intensities, scales, rotations, cov, affine, psf, *ctx.args,
             grad_image.contiguous(), ctx.instances, geom, binning, imgstate)
         if ctx.precomputed:
             return dm, dc, None, None, dS, None
@@ -262,7 +305,7 @@ class _RasterizeGaussians(torch.autograd.Function):
 # 在 custom Function 外进行 contiguous 和四元数归一化，使这些操作保留 PyTorch 梯度链。
 def rasterize_gaussians(means3D, intensities, raster_settings, *,
                         scales=None, rotations=None, cov3Ds_precomp=None):
-    """Sample a scalar field. Supply exactly one covariance parameterization.
+    """Sample a signed additive scalar field. Supply exactly one covariance parameterization.
 
     scales: positive activated standard deviations, not log-scales.
     rotations: wxyz quaternions, normalized here with differentiable PyTorch ops.
@@ -294,10 +337,13 @@ def rasterize_gaussians(means3D, intensities, raster_settings, *,
         # 使用 double 求四元数范数，降低 float32 平方和的溢出风险。
         # 零四元数没有有效方向，直接报错；非零四元数先单位化再转换回 float32。
         # CUDA 返回对单位四元数的梯度，PyTorch 再通过除以范数的运算传播到原始参数。
-        norms = rotations.double().norm(dim=1, keepdim=True)
+        # 固定四分量显式求和，避免部分 PyTorch/CUDA 版本的大批量 float64 行归约错误。
+        # 与二范数数学等价，保留 double 防溢出及完整自动求导链。
+        components = rotations.double().unbind(dim=1)
+        norms = torch.sqrt(sum(component.square() for component in components))
         if not bool(torch.isfinite(norms).all()) or bool((norms < 1e-12).any()):
             raise ValueError("rotations must be finite nonzero quaternions")
-        rotations = (rotations.double() / norms).float().contiguous()
+        rotations = torch.stack([component / norms for component in components], dim=1).float().contiguous()
         scales = scales.contiguous()
         cov = empty
     else:

@@ -1,195 +1,129 @@
-# C3DGS 无 opacity 仿射切片渲染库（详细中文注释版）
+# 加性 Gaussian 场与解析厚度切片渲染（v3.0.0）
 
-本版 v2.0.1 保留中文注释和渲染公式，修复 CUB 宏冲突并统一新包名。建议先阅读 `CODE_GUIDE_zh.md`，其中解释代码精简、GLM 替代与性能边界。
+当前版本用有符号加性 Gaussian 场代替 v2 的归一化灰度混合，并在 Preprocess 中将解析 Gaussian slice response 转成等效二维 footprint。保留 tile 分桶、CUB scan/radix sort、当前 CUDA stream 和两种协方差参数化。
 
-本交付基于 `sxzhuang0613-stack/C3DGS` 的 `master` 快照
-`94a0efe1c4a1b214be638f011a02bfc04e562e9a`，按两份 v1.1 文档及数值改进实现。
-这是完整的扩展源码目录，可独立安装；不是已编译二进制，也不是完整上层训练项目。
-
-**状态：已完成源码修改和静态整理。未进行 CUDA 编译、GPU 运行、数值梯度对照或训练验证。**
-示例用于说明新调用方式，未运行。没有修改远端 GitHub 仓库。
-
-## 1. 渲染模型
-
-每个像素的模型空间坐标为 `p = slice_to_world @ [column,row,0,1]`。
-第三列仅保存几何单位法向，不表示层厚，也不参与本版本采样。
-
-令 `S = covariance + covariance_jitter * I`、`Q = (p-mean)^T S^-1 (p-mean)`。
-基本模型为：
+## 模型
 
 ```text
-w_i = exp(-Q_i / 2)
-image = (sum_i w_i * intensity_i + tau * background) / (sum_i w_i + tau)
-weight_sum = sum_i w_i
+S_i = covariance_i + covariance_jitter * I
+E_i = S_i + v v^T
+D_i = 1 + v^T S_i^-1 v
+response_i(p) = exp[-(p-mu_i)^T E_i^-1 (p-mu_i)/2] / sqrt(D_i)
+image(p) = background + sum_i intensity_i * response_i(p)
 ```
 
-`tau = background_weight > 0`，强度是自由标量，不限制到 [0,1]；因此可表达负 HU。
-输入强度单位与背景必须一致；库不做 DICOM rescale、窗宽窗位或 MR 强度标准化。
-删除逐 Gaussian opacity、alpha/透射率、遮挡提前退出、SH、投影相机参数和外部 means2D。
-归一化核混合仍受 Gaussian 密度及 tau 影响；复制／分裂 Gaussian 不保证场值不变。
+`intensity` 是自由有符号贡献，不使用 opacity、SH、alpha compositing、Sigmoid、归一化分母或渲染输出截断。背景只加一次。零 Gaussian 或无候选时输出背景。
 
-### 平滑截断改进
+`v` 是固定的一倍标准差位移，不是可学习 Gaussian 属性：
 
-`Qmax = -2 log(kernel_cutoff)`。`Q >= Qmax` 时权重为零。
-`cutoff_transition = 0` 精确使用 v1.1 的硬截断模型（边界本身不可导）。
-默认 `cutoff_transition = 2.0`，在 `[Qmax-transition,Qmax]` 内令
-`t=(Q-(Qmax-transition))/transition`，并使用 `h=(1-t)^2(1+2t)`、`w=exp(-Q/2)*h`。
-区间之外 `h=1` 或 `0`。这消除外边界的一阶跳变，但确实改变了阈值附近的核形状。
+- `response_mode='point'`：`v=0`。
+- `response_mode='gaussian', psf_sigma=sigma`：`v=sigma*n`，`n` 为当前模型空间切片单位法向。
+- `response_mode='gaussian', psf_std_vector=[vx,vy,vz]`：直接使用模型空间位移向量，适合非等比物理坐标变换。两种 PSF 表达互斥。
 
-反向使用完整系数 `beta = g*(intensity-image)/denom * exp(-Q/2)*(h-2 dh/dQ)`，
-不是把 taper 当作常量。条件核包围范围仍按未加窗 Gaussian 的 Qmax 保守计算。
-平滑模式下不再对加窗后的 w 二次执行 `w > kernel_cutoff`，否则会重新引入跳变。
-若需要严格对照文档原公式，显式设置 `cutoff_transition=0`。
+Gaussian profile 是沿法向归一化的无限域 Gaussian 权重，不是有限区间均匀盒积分。零 PSF 与加性点采样共用同一路径；对非零 PSF，幅值修正 `1/sqrt(D)` 不可省略。固定 jitter 在基础核和幅值中使用同一个 S；一般仿射不变性验证应设 `covariance_jitter=0`，或一致地变换稳定协方差。
 
-### 数值处理
+## 二维计算和反向
 
-- 不使用 `det+epsilon` 逆矩阵；使用双精度 Cholesky 求有效协方差逆。
-- 预处理、前向、反向共享同一有效协方差与逆矩阵缓存。
-- 平面距离使用 `(n·(mean-origin))^2/(n^T S n)`，避免大数相减得到 q。
-- 包围半径使用条件二维协方差最大特征值，保留 1 像素余量。
-- 保留 inclusive scan → Gaussian/tile 复制 → radix sort → tile ranges；排序键为 tile 和 Gaussian ID，无深度遮挡语义。
-- 图像分母、预测及核累计用 double，公开参数、图像和梯度为 float32。原子梯度累计仍存在浮点非确定性。
-- 默认 `covariance_jitter=1e-8` 是模型坐标单位的平方；改变坐标单位应相应选择该值。
-  此各向同性稳定项不保证一般仿射变换下的严格不变性。若上游已稳定且正定，可设置为 0。
-- 有效协方差非正定或切片数值退化会报错，不静默丢弃坏 Gaussian。
-- 支持 PyTorch 当前 CUDA stream 和 device guard；前向为获得分桶总数存在主机同步。
-- 当前实现优先保证计算路径清晰一致，未做性能调优；不能假定速度等同原扩展。
+切片映射 `p=o+J*u`，`u=[column,row]`。Preprocess 计算：
 
-## 2. 安装
+```text
+P = E^-1
+H = J^T P J
+g = J^T P (mu-o)
+m = H^-1 g
+q = [n_geo^T(mu-o)]^2 / (n_geo^T E n_geo)
+log_amplitude = -(q + log(D))/2
+response(u) = exp(log_amplitude - (u-m)^T H (u-m)/2)
+```
 
-依赖 Python >=3.9、带 CUDA 支持的 PyTorch、与其兼容的 CUDA Toolkit/nvcc、C++ 编译器和 setuptools。
-原始 GLM/第三方目录已不再被本扩展引用，无需拷贝。使用 CUDA Toolkit 提供的 CUB scan/radix-sort 头文件。
-原始许可证保留在 `LICENSE.md`，使用范围仍受其约束。
+使用 double Cholesky 和 `log1p`，不使用 `det+epsilon` 或通过增大 jitter 掩盖退化。法向商避免补平方时的大数相减。像素核只读取二维中心、二维精度和对数幅值。
 
-建议在解压后的干净源码目录重新安装，避免旧 `.pyd/.so` 被导入：
+反向先在像素阶段累积二维中心、对称精度、对数幅值和 intensity 梯度，再逐 Gaussian 回传三维位置和协方差。无支撑窗时，令 `w=E^-1(p-mu)`：
+
+```text
+d log(response)/d mu = w
+d log(response)/d S = (S^-1 - E^-1 + w w^T)/2
+```
+
+其中 `S^-1-E^-1` 来自幅值修正。之后复用尺度/四元数链式求导；预计算协方差直接返回 packed 梯度。Python 在 custom Function 外可微归一化 wxyz，CUDA 不重复归一化。当前仅支持一阶梯度。
+
+## 有限支撑与 tile culling
+
+完整解析积分是数学精确的；实际 rasterizer 对积分后的二维响应施加有限支撑近似，而不是先截断三维 Gaussian 再积分。
+
+```text
+Q = (u-m)^T H (u-m) + q + log(D)
+Qmax = -2*log(kernel_cutoff)
+```
+
+`kernel_cutoff` 作用于不含有符号 intensity 的响应。`Q>=Qmax` 时裁剪；footprint 半径由 `Qmax-q-log(D)` 和 `H^-1` 的最大特征值决定。中心不在切片上的 Gaussian 仍可能产生厚度响应，不能按原始薄切片距离提前剔除。
+
+`cutoff_transition=0` 使用硬支撑，边界本身不可导。默认 `2` 在最后一段 Q 区间施加 C1 三次窗；前后向均包含窗函数导数。这会改变尾部核形状，不再是严格完整 Gaussian。窗口内、窗口外误差单独验证。整图裁剪误差受 `sum(abs(intensity))` 影响，不能把单核阈值当成整图固定误差。
+
+Tile 是保守候选，`radii` 不是精确像素贡献。排序仍按 tile/ID，不做遮挡或正负贡献早停。
+
+## Python 接口
+
+```python
+settings = GaussianRasterizationSettings.from_axis(
+    image_height=128, image_width=128, axis=2,
+    slice_idx=4.25, num_slices=9, bounds=(1.,1.,1.),
+    response_mode='gaussian', psf_sigma=.05,  # 示例值，单位是模型坐标
+)
+image, radii, weight_sum = rasterize_gaussians(
+    means3D, intensities, settings, scales=scales, rotations=rotations,
+)
+# 或只传 cov3Ds_precomp=covariance
+```
+
+| 输入/输出 | 契约 |
+|---|---|
+| means3D | CUDA float32 `[N,3]` |
+| intensities | CUDA float32 `[N,1]`，自由有符号贡献 |
+| scales / rotations | CUDA float32 `[N,3]` 正标准差 / `[N,4]` wxyz |
+| cov3Ds_precomp | CUDA float32 `[N,6]`，xx,xy,xz,yy,yz,zz；与尺度/旋转互斥 |
+| image | float32 `[1,H,W]`，可微，无输出截断 |
+| radii | int32 `[N]`，不可微 |
+| weight_sum | float32 `[1,H,W]`，不可微的响应和，不含背景或 intensity |
+
+`GaussianRasterizer` 保留同一薄包装。公开输出和模型属性不变。旧 Python `background_weight` 参数只用于构造兼容，会发出弃用提示且完全不参与计算；配置已移除此参数。旧归一化模型的 intensity 数值不具有新的加性含义，加载同形状 PLY 不保证重建结果相同。
+
+## 物理坐标
+
+`slice_to_world` 保持 row-major 4×4 约定：前两列是像素列/行三维位移，第四列是首像素中心，第三列保存由叉积计算的几何单位法向。支持任意斜切片、旋转各向异性核和显式裁剪/resize 映射。
+
+Slice spacing 定位中心平面；slice thickness 是采集层厚；PSF sigma 是 profile 标准差，三者不自动互相替代。不从 DICOM `SliceThickness` 推断 sigma。若另行明确 profile 的 FWHM，调用方可显式换算 `sigma=FWHM/(2*sqrt(2*log(2)))`。
+
+```python
+settings = GaussianRasterizationSettings.from_dicom(
+    ds, response_mode='gaussian', psf_sigma_mm=2.0,
+    model_from_patient=patient_to_model,
+)
+```
+
+该入口先在患者 LPS mm 坐标中定义 `v_mm=sigma_mm*n_mm`，再用仿射线性部分 M 转换 `v_model=M*v_mm`。几何法向按 `M^-T*n_mm` 变化，非等比缩放/shear 下不能拿它替代物理 PSF 位移。调用方须同步变换 Gaussian 均值和协方差。`psf_sigma_mm` 不能与模型空间 PSF 参数混用。
+
+`with_pixel_transform()` 接受新像素到旧像素的 3×3 仿射，保留 PSF；resize 不改变采集 profile。几何与 PSF 为固定输入，前向保存独立快照，不支持学习它们。
+
+归一化训练入口使用 `from_axis`，无法仅凭病例尺寸/bounds 恢复毫米 PSF。训练/测试配置新增 `response_mode`、`psf_sigma`、`psf_std_vector`，默认 point；需要已知的模型空间 PSF 才开启 gaussian。
+
+## 构建和验证
+
+依赖现有 CUDA PyTorch、兼容 CUDA Toolkit/nvcc、C++17 编译器、setuptools；使用 Toolkit CUB，不依赖 GLM。未增加运行时依赖。
 
 ```bash
 cd diff-gaussian-slice-rendering
 python -m pip install --no-build-isolation .
 ```
 
-架构由 PyTorch 和 `TORCH_CUDA_ARCH_LIST` 决定，不再硬编码 sm_86。
-如覆盖旧目录，应先清理该目录内的旧扩展二进制及 `build/`，然后重新安装。
-Python 会检查 native `API_VERSION == 2`，检测到旧版本会明确报错。
-`CMakeLists.txt` 仅构建原生 CUDA 静态库；Python 绑定请使用上面的安装方式。
+native `API_VERSION=3`；Python 拒绝旧二进制。`CMakeLists.txt` 仅构建原生静态库。`BUILD_FIX_zh.md` 和 `CODE_GUIDE_zh.md` 为 v2 历史说明，当前模型以本文件为准。
 
-## 3. 公共接口
+从项目根目录运行：
 
-```python
-image, radii, weight_sum = rasterize_gaussians(
-    means3D, intensities, raster_settings,
-    scales=scales, rotations=rotations,
-    # 或只传 cov3Ds_precomp=covariance
-)
+```bash
+python -m unittest discover -s tests -p test_slice_response.py -v
 ```
 
-| 输入／输出 | 形状与含义 |
-|---|---|
-| means3D | CUDA float32 `[N,3]`，模型坐标 |
-| intensities | CUDA float32 `[N,1]`，标量强度 |
-| scales | CUDA float32 `[N,3]`，正的已激活标准差，不是 log scale |
-| rotations | CUDA float32 `[N,4]`，`w,x,y,z`，Python 内可微归一化 |
-| cov3Ds_precomp | CUDA float32 `[N,6]`，`xx,xy,xz,yy,yz,zz`，协方差而非精度矩阵 |
-| image | float32 `[1,H,W]`，可微 |
-| radii | int32 `[N]`，不可微；仅用于候选范围／粗可见性 |
-| weight_sum | float32 `[1,H,W]`，不可微诊断量，不包含 tau |
+独立 `build_ext --build-lib <dir>` 后，可设置 `C3DGS_EXTENSION_DIR=<dir>` 运行测试，无需安装。`reference.py` 提供小规模 float64 PyTorch 参考：完整三维响应、二维 footprint 和可选裁剪。测试覆盖高精度数值积分、解析等价性、负强度、物理仿射、两条协方差梯度、裁剪窗口和训练 wrapper。
 
-两个 covariance 输入路径必须二选一。支持非连续 Tensor，Python 会作可微 contiguous 转换。
-各 Tensor 必须同设备，不自动转 dtype。`N=0` 和零候选输出背景图、零权重。
-内部 autograd 六输入对应六项返回，native backward 返回五项 Gaussian 梯度；仅支持一阶梯度。
-`weight_sum` 不能直接用于可微 coverage loss；切片矩阵、tau、背景、截断和 jitter 都不学习。
-
-设置项：
-
-```python
-GaussianRasterizationSettings(
-    image_height=128, image_width=128, slice_to_world=T,
-    background=0., background_weight=.01, kernel_cutoff=.001,
-    cutoff_transition=2., covariance_jitter=1e-8, debug=False,
-)
-```
-
-矩阵构造与保存使用 CPU float64；渲染时快照转换为同设备 float32。
-CUDA 使用 row-major `[4,4]`，前后向保存并使用同一次快照。
-底行为 `[0,0,0,1]`，前两列必须线性独立。第三列由前两列叉积重新归一化。
-若大绝对物理坐标与很小尺度导致 float32 精度不足，应先统一平移／缩放模型和切片坐标。
-
-## 4. 三种几何入口
-
-### 无 DICOM 的三轴模式
-
-```python
-settings = GaussianRasterizationSettings.from_axis(
-    image_height=128, image_width=128,
-    axis=2, slice_idx=4, num_slices=9, bounds=(1.,1.,1.),
-)
-```
-
-bounds 为模型坐标半边长。面内步长为 `2*b/W`、`2*b/H`，首像素在 `-b+b/W`、`-b+b/H`。
-切片位置为 `-b_axis+2*b_axis*slice_idx/(num_slices-1)`；单层居中为 0。
-axis 0 对应列 y／行 z，axis 1 对应列 x／行 z，axis 2 对应列 x／行 y。
-axis 1 的叉积法向为 -y，不影响点采样，不强行改成 +y。
-
-### DICOM／SAX／LAX
-
-```python
-settings = GaussianRasterizationSettings.from_dicom(
-    ds, model_from_patient=None,  # None 表示直接使用 LPS mm
-    # frame_index=0,             # 多帧必须显式指定，零起点
-)
-```
-
-列方向 = IOP 前三个值 × PixelSpacing[1]；行方向 = IOP 后三个值 × PixelSpacing[0]；
-首像素中心 = ImagePositionPatient。支持 classic single-frame 和增强型 per-frame/shared functional groups。
-多帧必须提供所选帧的 PlanePositionSequence/ImagePositionPatient，拒绝凭 SliceThickness 推断位置。
-缺失／不兼容的几何请用已知 `slice_to_world`，不静默补成正交轴向。
-无硬性 pydicom 依赖；传入提供相应属性的 Dataset 即可。
-
-若模型不是 LPS mm，提供显式的患者→模型 `model_from_patient [4,4]`。
-Gaussian 均值也要施加相同变换，协方差需用 `A @ covariance @ A.T` 变换。
-本库只变换切片几何，不自动重写 Gaussian。LPS→RAS 可使用 diag(-1,-1,1,1)。
-切片几何不读取像素强度，不自动处理时间配准或跨序列 MR 强度一致性。
-
-### 直接矩阵与裁剪／缩放
-
-```python
-settings = GaussianRasterizationSettings(H, W, T)
-# M 把新像素 [column,row,1] 映射回原图像素坐标
-new_settings = settings.with_pixel_transform(M, image_height=new_H, image_width=new_W)
-```
-
-例如从原图 `(left,top)` 开始裁剪，`M=[[1,0,left],[0,1,top],[0,0,1]]`。
-按半像素约定 resize：`sx=old_W/new_W, sy=old_H/new_H`，
-`M=[[sx,0,(sx-1)/2],[0,sy,(sy-1)/2],[0,0,1]]`。
-这对应常见 `align_corners=False` 的采样坐标；其他插值坐标约定应使用其实际 M。
-不能仅改 H/W 后复用旧矩阵。DICOM 构造器也可传 pixel_to_source 与新 H/W。
-
-## 5. 迁移范围与文件
-
-修改文档列出的全部 12 个核心文件，另修改 `auxiliary.h`、`setup.py`、`CMakeLists.txt`：
-前者集中前后向共用的核／矩阵运算并去掉遗留 GLM/投影辅助依赖，后两者配套构建与架构配置。
-新增本说明、`MANIFEST.in` 和 `examples/render_slice.py`。
-
-本 v2.0.1 为独立的完整修复版源码目录，不需要应用旧 `changes.patch`。
-修复细节与安装命令见 `BUILD_FIX_zh.md`。
-
-上层调用需删除旧 `opacities/means2D/SH/camera` 参数，RGB 强度改为明确的 `[N,1]`。
-Stage 1 继续 scales+rotations；Stage 2 使用预计算 covariance。
-训练代码、PLY、optimizer opacity group、densify/prune 及运动模型属于上层项目，本包未修改。
-不要把此源码包理解为上层训练项目已完成适配。
-
-本版实现无限薄平面上的标量场采样；不是 CT 投影积分，也未加入 MR slice profile／有限层厚积分。
-
-## 6. 内部接口差异
-
-为统一参数校验和双向配置，native forward/backward 共享前缀：
-`(means,intensities,scales,rotations,covariance,slice_to_world,H,W,background,tau,cutoff,transition,jitter,debug)`。
-与文档建议的 native 参数排列不同，但 Python/C++/CUDA 在此版本同步，公共 Python 接口保持文档约定。
-forward 返回 `(instances,image,radii,geomBuffer,binningBuffer,imageBuffer,weight_sum)`。
-backward 在共享前缀后接 `(grad_image,instances,geomBuffer,binningBuffer,imageBuffer)`，
-返回 `(grad_means,grad_intensities,grad_scales,grad_rotations,grad_covariance)`。
-不要从上层直接调用私有 `_C_G3D`，尤其不要混用旧二进制和新 Python 文件。
-
-缓存不再采用旧版本字节布局：保存 double 精度 precision、denom/prediction，64 位扫描计数与矩形范围。
-分桶总数超过 INT_MAX-255 会报错，避免整数溢出。扫描／排序的临时空间保留在前向缓存中。
-所有 Python 输出和 native 签名已成套改动；旧缓存不可跨版本复用。
+`examples/benchmark_slice.py` 进行短时间前向/反向及峰值显存测试，参数由 CLI 指定。不同模型的数值输出不应比较为相同；性能比较必须说明点数、分辨率、PSF 和支撑范围。

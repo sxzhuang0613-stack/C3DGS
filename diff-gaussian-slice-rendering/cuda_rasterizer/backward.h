@@ -11,11 +11,12 @@
 
 #pragma once
 #include "rasterizer_impl.h"
-// 反向接口：render 求均值/强度/协方差梯度；preprocess 将协方差梯度继续传到尺度/旋转。
+// 像素阶段求二维 footprint 梯度；预处理阶段完整回传三维属性。
 // 没有 opacity、SH、深度或切片矩阵梯度输出。
 namespace BACKWARD {
 void render(const CudaRasterizer::Parameters&, CudaRasterizer::GeometryState,
     CudaRasterizer::BinningState, CudaRasterizer::ImageState, const float*,
     CudaRasterizer::Gradients, dim3, cudaStream_t);
-void preprocess(const CudaRasterizer::Parameters&, CudaRasterizer::Gradients, cudaStream_t);
+void preprocess(const CudaRasterizer::Parameters&, CudaRasterizer::GeometryState,
+    CudaRasterizer::Gradients, cudaStream_t);
 }

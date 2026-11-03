@@ -23,7 +23,7 @@ using namespace CudaRasterizer;
 // 这些 Tensor 由 PyTorch 管理生命周期，不另行 cudaMalloc/cudaFree。
 GeometryState GeometryState::fromChunk(char*& p,size_t n) {
     GeometryState g{};
-    obtain(p,g.means2D,n); obtain(p,g.precision,6*n); obtain(p,g.rectangles,n);
+    obtain(p,g.means2D,n); obtain(p,g.precision,3*n); obtain(p,g.log_amplitude,n); obtain(p,g.rectangles,n);
     obtain(p,g.tiles_touched,n); obtain(p,g.point_offsets,n); obtain(p,g.invalid,1);
     // 首次以临时存储指针 nullptr 查询 CUB scan 需要的字节数。
     // 后续从同一 chunk 中分配该空间；计数/前缀和用 uint64_t 防止累加先溢出。
@@ -39,9 +39,9 @@ BinningState BinningState::fromChunk(char*& p,size_t n) {
     obtain(p,b.sort_space,b.sort_size); return b;
 }
 // ranges 按像素数预留，实际只使用 tile 数那一段，属于保守分配。
-// denom/prediction 各有 H*W 个 double，既不复用旧 alpha 缓存，也不复用输出 float 图像。
+// 加性反向不读取像素预测值，不再分配两个 H*W double 缓存。
 ImageState ImageState::fromChunk(char*& p,size_t n) {
-    ImageState i{}; obtain(p,i.ranges,n); obtain(p,i.denom,n); obtain(p,i.prediction,n); return i;
+    ImageState i{}; obtain(p,i.ranges,n); return i;
 }
 // 每个 Gaussian 生成它覆盖的全部 tile 实例。
 // 包含 M 个 tile 的 Gaussian 会在列表中出现 M 次，但在某个 tile 内只出现一次。
@@ -111,5 +111,5 @@ void Rasterizer::backward(const Parameters& p,int instances,char* geometry,char*
     ImageState im=ImageState::fromChunk(image,size_t(p.width)*p.height);
     dim3 grid((p.width+kTileWidth-1)/kTileWidth,(p.height+kTileHeight-1)/kTileHeight);
     BACKWARD::render(p,g,b,im,incoming,grads,grid,s); cudaCheck(cudaGetLastError());
-    BACKWARD::preprocess(p,grads,s); cudaCheck(cudaGetLastError());
+    BACKWARD::preprocess(p,g,grads,s); cudaCheck(cudaGetLastError());
 }

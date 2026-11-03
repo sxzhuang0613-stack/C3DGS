@@ -80,7 +80,9 @@ def dataset_options(args):
 def render_options(args):
     return dict(bounds=args.bounds, raster_options={
         'background': args.background,
-        'background_weight': args.background_weight,
+        'response_mode': args.response_mode,
+        'psf_sigma': args.psf_sigma,
+        'psf_std_vector': args.psf_std_vector,
         'kernel_cutoff': args.kernel_cutoff,
         'cutoff_transition': args.cutoff_transition,
         'covariance_jitter': args.covariance_jitter,

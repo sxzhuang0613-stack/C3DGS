@@ -23,13 +23,15 @@ ForwardResult RasterizeGaussiansCUDA(
     const torch::Tensor& means,const torch::Tensor& intensities,
     const torch::Tensor& scales,const torch::Tensor& rotations,
     const torch::Tensor& covariance,const torch::Tensor& slice_to_world,
-    int height,int width,double background,double tau,double cutoff,
+    const torch::Tensor& psf_vector,
+    int height,int width,double background,double cutoff,
     double transition,double jitter,bool debug);
 BackwardResult RasterizeGaussiansBackwardCUDA(
     const torch::Tensor& means,const torch::Tensor& intensities,
     const torch::Tensor& scales,const torch::Tensor& rotations,
     const torch::Tensor& covariance,const torch::Tensor& slice_to_world,
-    int height,int width,double background,double tau,double cutoff,
+    const torch::Tensor& psf_vector,
+    int height,int width,double background,double cutoff,
     double transition,double jitter,bool debug,
     const torch::Tensor& incoming,int instances,const torch::Tensor& geometry,
     const torch::Tensor& binning,const torch::Tensor& image);

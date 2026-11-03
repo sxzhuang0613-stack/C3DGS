@@ -5,12 +5,14 @@ from diff_gaussian_slice_rendering import GaussianRasterizationSettings, rasteri
 # 示例刻意创建极少量 Gaussian，展示参数单位与可微输入路径。
 # 这是调用示例，不是完整训练器或已通过的正确性测试。
 xyz = torch.tensor([[0., 0., 0.], [.3, -.2, .1]], device="cuda", requires_grad=True)
-intensity = torch.tensor([[.4], [.9]], device="cuda", requires_grad=True)
+intensity = torch.tensor([[.4], [-.3]], device="cuda", requires_grad=True)
 log_scales = torch.full((2, 3), -2., device="cuda", requires_grad=True)
 quaternion = torch.tensor([[1., 0., 0., 0.], [1., .1, 0., 0.]], device="cuda", requires_grad=True)
 settings = GaussianRasterizationSettings.from_axis(
     image_height=128, image_width=128, axis=2, slice_idx=4, num_slices=9,
-    bounds=(1., 1., 1.), background=0., background_weight=.01,
+    bounds=(1., 1., 1.), background=0.,
+    # 此处 sigma 明确使用模型坐标单位；物理毫米请使用 from_dicom 的 psf_sigma_mm。
+    response_mode='gaussian', psf_sigma=.05,
     kernel_cutoff=.001, cutoff_transition=2., covariance_jitter=1e-8,
 )
 image, radii, weight_sum = rasterize_gaussians(

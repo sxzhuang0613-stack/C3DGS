@@ -8,8 +8,8 @@ from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 root = Path(__file__).resolve().parent
 setup(
     name="diff-gaussian-slice-rendering",
-    version="2.0.1",
-    description="Opacity-free differentiable scalar Gaussian slice rasterization",
+    version="3.0.0",
+    description="Additive Gaussian fields with analytic slice response",
     packages=["diff_gaussian_slice_rendering"],
     python_requires=">=3.9",
     # 五个翻译单元分别是调度、前向、反向、Tensor 桥接与 PyBind 注册。

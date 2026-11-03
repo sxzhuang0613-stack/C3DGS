@@ -13,14 +13,10 @@
 #include "rasterizer.h"
 #include <cstdint>
 namespace CudaRasterizer {
-// One explicit layout is shared by forward and backward. Double precision is
-// used for inverse covariance, geometry and image accumulators, not parameters.
-// 几何缓存按 Gaussian 分配：条件二维中心、六项 inverse covariance、tile 矩形、
-// 64 位 tile 计数/扫描结果，以及错误标志和 scan 临时空间。
-// means2D 仅为内部条件核中心；它不是旧版公开的可学习二维投影占位输入。
+// 每 Gaussian 缓存像素中心、二维精度 xx/xy/yy 与对数幅值；不保存三维像素运算。
 struct GeometryState {
     double2* means2D;
-    double* precision;
+    double *precision, *log_amplitude;
     uint4* rectangles;
     uint64_t *tiles_touched, *point_offsets;
     int* invalid;
@@ -36,10 +32,9 @@ struct BinningState {
     char* sort_space;
     static BinningState fromChunk(char*&, size_t);
 };
-// 按 H*W 分配，保存 tile ranges 和图像商法则反向必需的 D、I。
+// 仅保存 tile 候选范围；加性模型不需要图像分母或预测缓存。
 struct ImageState {
     uint2* ranges;
-    double *denom, *prediction;
     static ImageState fromChunk(char*&, size_t);
 };
 // 通过 uintptr_t 完成对齐，计算方式与数据类型字节大小显式对应。

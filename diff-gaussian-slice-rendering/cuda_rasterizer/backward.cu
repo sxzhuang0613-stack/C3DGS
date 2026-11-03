@@ -12,42 +12,75 @@
 #include "backward.h"
 #include "auxiliary.h"
 using namespace CudaRasterizer;
-// 【像素损失 -> Gaussian 参数梯度】
-// 每线程读取一个像素的上游梯度 g，以及同次 forward 保存的 D 和预测 I。
-// 对于 I=(sum(w*c)+tau*b)/D，有 dL/dc=g*w/D，dL/dw=g*(c-I)/D。
-// 同一 Gaussian 可被多个像素访问，最终参数梯度必须用 atomicAdd 累加。
+
+// 每像素仅反传二维中心、对称精度与 log 幅值；含平滑支撑窗的完整导数。
 __global__ void backwardCUDA(Parameters p,GeometryState geom,BinningState bin,ImageState img,const float* incoming,Gradients g) {
     int x=blockIdx.x*kTileWidth+threadIdx.x,y=blockIdx.y*kTileHeight+threadIdx.y;
     if(x>=p.width||y>=p.height) return;
-    int pix=y*p.width+x;
-    double point[3]; pixelPoint(p.slice_to_world,x,y,point);
-    // scale=g/D。这里的 D 和 I 来自 forward 缓存，避免重复归一化造成不一致。
-    // 背景、tau、矩阵和截断超参数在本版本均固定，不返回其梯度。
-    double scale=incoming[pix]/img.denom[pix],pred=img.prediction[pix];
+    double upstream=incoming[y*p.width+x];
     uint2 range=img.ranges[blockIdx.y*gridDim.x+blockIdx.x];
     for(uint32_t j=range.x;j<range.y;++j) {
-        uint32_t i=bin.list[j]; double d[3],v[3],w,slope;
-        for(int a=0;a<3;++a) d[a]=point[a]-p.means[3*i+a];
-        // 重复使用 forward 的二次型、支撑边界和 taper 函数。
-        // 不能前向用平滑窗、反向却只用未加窗 Gaussian 的导数。
-        if(!kernelWeight(quadratic(geom.precision+6*i,d,v),p,w,slope)) continue;
-        // kernelWeight 返回 slope=-2*dw/dQ。
-        // 因此 beta=(dL/dw)*slope；硬截断内部 slope=w，恢复文档中的 beta=w*g*(c-I)/D。
-        // 设 v=S^-1(p-mu)：dL/dmu=beta*v，dL/dS=(beta/2)*v*v^T。
-        double beta=scale*(p.intensities[i]-pred)*slope;
-        atomicAdd(g.intensities+i,(float)(scale*w));
-        for(int a=0;a<3;++a) atomicAdd(g.means+3*i+a,(float)(beta*v[a]));
-        // packed 协方差的 xy/xz/yz 同时影响矩阵中的两个对称元素，
-        // 所以它们的导数比单个矩阵元素导数多一倍。
-        // 循环顺序恰好生成 xx,xy,xz,yy,yz,zz；不能随意改变存储顺序。
-        int index=0;
-        for(int a=0;a<3;++a) for(int b=a;b<3;++b)
-            atomicAdd(g.covariance+6*i+index++,(float)(beta*v[a]*v[b]*(a==b?0.5:1.0)));
+        uint32_t i=bin.list[j];
+        double dx=x-geom.means2D[i].x,dy=y-geom.means2D[i].y;
+        const double* h=geom.precision+3*i;
+        double Q=h[0]*dx*dx+2*h[1]*dx*dy+h[2]*dy*dy-2*geom.log_amplitude[i];
+        double response,slope;
+        if(!kernelWeight(Q,p,response,slope)) continue;
+        double beta=upstream*p.intensities[i]*slope;
+        atomicAdd(g.intensities+i,(float)(upstream*response));
+        float* f=g.footprint+6*i;
+        atomicAdd(f,(float)(beta*(h[0]*dx+h[1]*dy)));
+        atomicAdd(f+1,(float)(beta*(h[1]*dx+h[2]*dy)));
+        atomicAdd(f+2,(float)(-0.5*beta*dx*dx));
+        atomicAdd(f+3,(float)(-beta*dx*dy));
+        atomicAdd(f+4,(float)(-0.5*beta*dy*dy));
+        atomicAdd(f+5,(float)beta);
     }
 }
-// 【协方差梯度 -> 尺度和旋转梯度】
-// 只在 scales+rotations 路径执行。预计算 covariance 路径直接把 packed 梯度返回上游。
-// 本函数每线程独占一个 Gaussian 的尺度与四元数结果，因此不需要 atomicAdd。
+
+// 每 Gaussian 独占三维梯度，完整反传 m=H^-1 J^T P d 和稳定 q、logD。
+// PSF 向量固定：dS_eff=dS；幅值产生 0.5*(S^-1-P) 项，不能只对扩大的核求导。
+__global__ void footprintBackward(Parameters p,GeometryState geom,Gradients g) {
+    int i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=p.count || !geom.tiles_touched[i]) return;
+    double S[9],K[9],E[9],P[9],logD;
+    if(!gaussianMatrices(p,i,S,K,E,P,logD)) return; // forward 已校验相同参数。
+    double J[3][2],d[3],n[3]; sliceGeometry(p,i,J,d,n);
+    const double* h=geom.precision+3*i;
+    double V[3]; inverse2D(h[0],h[1],h[2],V);
+    const float* f=g.footprint+6*i;
+    double t[2]={V[0]*f[0]+V[1]*f[1],V[1]*f[0]+V[2]*f[1]};
+    double m[2]={geom.means2D[i].x,geom.means2D[i].y};
+    // packed xy 同时作用于两个矩阵位置，在矩阵链式求导前各分一半。
+    double GH[2][2]={{f[2],0.5*f[3]},{0.5*f[3],f[4]}};
+    for(int a=0;a<2;++a) for(int b=0;b<2;++b)
+        GH[a][b]-=0.5*(t[a]*m[b]+m[a]*t[b]);
+    double jt[3]={0},nd=0,nen=0,GP[9]={0};
+    for(int a=0;a<3;++a) {
+        for(int k=0;k<2;++k) jt[a]+=J[a][k]*t[k];
+        nd+=n[a]*d[a];
+        for(int b=0;b<3;++b) nen+=n[a]*E[3*a+b]*n[b];
+    }
+    for(int a=0;a<3;++a) for(int b=0;b<3;++b) {
+        for(int k=0;k<2;++k) for(int l=0;l<2;++l)
+            GP[3*a+b]+=J[a][k]*GH[k][l]*J[b][l];
+        GP[3*a+b]+=0.5*(jt[a]*d[b]+d[a]*jt[b]);
+    }
+    for(int a=0;a<3;++a) {
+        double dm=-double(f[5])*nd/nen*n[a];
+        for(int b=0;b<3;++b) dm+=P[3*a+b]*jt[b];
+        g.means[3*i+a]=(float)dm;
+    }
+    double ratio=nd/nen; int index=0;
+    for(int a=0;a<3;++a) for(int b=a;b<3;++b) {
+        double gradient=0;
+        for(int k=0;k<3;++k) for(int l=0;l<3;++l)
+            gradient-=P[3*a+k]*GP[3*k+l]*P[3*l+b];
+        gradient+=0.5*double(f[5])*(K[3*a+b]-P[3*a+b]+ratio*ratio*n[a]*n[b]);
+        g.covariance[6*i+index++]=(float)(gradient*(a==b?1:2));
+    }
+}
+
 __global__ void covarianceBackward(Parameters p,Gradients g) {
     int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=p.count) return;
     const float* c=g.covariance+6*i;
@@ -82,11 +115,12 @@ __global__ void covarianceBackward(Parameters p,Gradients g) {
         g.rotations[4*i+a]=(float)v;
     }
 }
-// 反向仍遍历当前 tile 的全部有效候选，没有旧 alpha 合成的逆序回放。
-// Gaussian 顺序对数学结果无影响，但浮点累积次序可能带来小差异。
+
 void BACKWARD::render(const Parameters& p,GeometryState g,BinningState b,ImageState im,const float* incoming,Gradients grads,dim3 grid,cudaStream_t s) {
     backwardCUDA<<<grid,dim3(kTileWidth,kTileHeight),0,s>>>(p,g,b,im,incoming,grads);
 }
-void BACKWARD::preprocess(const Parameters& p,Gradients g,cudaStream_t s) {
-    if(p.count && !p.covariance) covarianceBackward<<<(p.count+255)/256,256,0,s>>>(p,g);
+void BACKWARD::preprocess(const Parameters& p,GeometryState geom,Gradients g,cudaStream_t s) {
+    if(!p.count) return;
+    footprintBackward<<<(p.count+255)/256,256,0,s>>>(p,geom,g);
+    if(!p.covariance) covarianceBackward<<<(p.count+255)/256,256,0,s>>>(p,g);
 }

@@ -11,7 +11,7 @@
 
 #pragma once
 #include "rasterizer_impl.h"
-// 前向接口：preprocess 每 Gaussian 构造候选范围；render 每像素形成归一化强度。
+// 前向接口：preprocess 每 Gaussian 构造候选范围；render 每像素累加二维响应。
 // Parameters 与 State 结构避免原版大量同类型裸指针参数的顺序错配。
 namespace FORWARD {
 void preprocess(const CudaRasterizer::Parameters&, CudaRasterizer::GeometryState, int*, dim3, cudaStream_t);

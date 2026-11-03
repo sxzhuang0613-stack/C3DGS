@@ -15,7 +15,7 @@
 // API_VERSION 用来拒绝旧版 .so/.pyd，避免新 Python 包装错误加载旧签名的二进制。
 // 这里不负责自动微分；自动微分协议由 Python 的 torch.autograd.Function 实现。
 PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {
-    m.attr("API_VERSION")=2;
-    m.def("rasterize_gaussians",&RasterizeGaussiansCUDA,"Opacity-free scalar slice forward (CUDA)");
-    m.def("rasterize_gaussians_backward",&RasterizeGaussiansBackwardCUDA,"Opacity-free scalar slice backward (CUDA)");
+    m.attr("API_VERSION")=3;
+    m.def("rasterize_gaussians",&RasterizeGaussiansCUDA,"Additive analytic slice forward (CUDA)");
+    m.def("rasterize_gaussians_backward",&RasterizeGaussiansBackwardCUDA,"Additive analytic slice backward (CUDA)");
 }

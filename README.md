@@ -13,7 +13,7 @@ cd diff-gaussian-slice-rendering
 python -m pip install --no-build-isolation .
 ```
 
-需要当前源码的 API_VERSION=2 二进制；详细安装说明见该目录 README。
+需要当前源码的 API_VERSION=3 二进制；详细安装说明见该目录 README。
 
 ## 配置和运行
 
@@ -47,7 +47,7 @@ NPZ 包含 `cmr: [T,S,H,W]`、`labels: [P,S,H,W]` 和 JSON 字符串 `info`。`d
 
 `roi_mask` 可选，三维 mask 默认为 `[S,H,W]`，也可用 `roi_layout` 指定其他轴序；`S/D/Z` 为层，`H/Y` 为行，`W/X` 为列。`[M,3]` 点集直接表示模型空间 XYZ。单层 ROI 的层坐标位于模型中心。
 
-`bounds` 为模型空间 XYZ 半边长，初始化和渲染使用同一配置。当前渲染是在无限薄切片平面上采样归一化标量高斯场，不包含 opacity 合成、射线积分或有限层厚积分。
+`bounds` 为模型空间 XYZ 半边长，初始化和渲染使用同一配置。当前渲染为有符号加性 Gaussian 场，支持 point 和解析 Gaussian PSF 厚度响应；Preprocess 转为等效二维核。背景只加一次，不包含 opacity 合成或灰度归一化。`response_mode` 默认为 point；gaussian 的 `psf_sigma` 使用模型坐标单位，或显式提供 `psf_std_vector`。不能把切片间距当成 PSF sigma；毫米及非等比坐标转换见渲染库 README。
 
 ## 保存和恢复
 

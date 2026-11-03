@@ -23,7 +23,12 @@ legacy_color_policy: "strict"
 
 # 固定切片渲染参数（协方差 jitter 单位为模型坐标的平方）
 background: 0.0
-background_weight: 0.01
+# point 为加性点采样；gaussian 必须提供已知 PSF，不能从 slice spacing 推断。
+response_mode: "point"
+# 模型坐标单位的标准差；与 psf_std_vector 二选一，零值严格退化为 point。
+psf_sigma: 0.0
+# 非等比物理坐标变换后的一倍标准差位移 [vx,vy,vz]，默认不启用。
+psf_std_vector: null
 kernel_cutoff: 0.001
 cutoff_transition: 2.0
 covariance_jitter: 1.0e-08

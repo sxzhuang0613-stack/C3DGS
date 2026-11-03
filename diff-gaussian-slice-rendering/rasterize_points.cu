@@ -29,15 +29,17 @@ static void tensorCheck(const Tensor& t,const Tensor& ref,const char* name) {
 }
 // 组装并校验原生参数。forward 和 backward 共用该函数，确保两次解释一致。
 // 支持 N=0；使用 shape 而不是 numel 判定预计算分支，以区分 [0,6] 与空占位 [0]。
-static Parameters parameters(const Tensor& m,const Tensor& c,const Tensor& scales,const Tensor& rot,const Tensor& cov,const Tensor& t,
-    int H,int W,double bg,double tau,double cutoff,double transition,double jitter) {
+static Parameters parameters(const Tensor& m,const Tensor& c,const Tensor& scales,const Tensor& rot,const Tensor& cov,const Tensor& t,const Tensor& psf,
+    int H,int W,double bg,double cutoff,double transition,double jitter) {
     tensorCheck(m,m,"means3D"); tensorCheck(c,m,"intensities"); tensorCheck(scales,m,"scales");
     tensorCheck(rot,m,"rotations"); tensorCheck(cov,m,"cov3Ds_precomp"); tensorCheck(t,m,"slice_to_world");
+    tensorCheck(psf,m,"psf_vector");
+    TORCH_CHECK(psf.dim()==1 && psf.size(0)==3,"psf_vector must have shape [3]");
     TORCH_CHECK(m.dim()==2 && m.size(1)==3 && m.size(0)<=INT_MAX/9,"means3D must have shape [N,3] with N <= INT_MAX/9");
     int n=(int)m.size(0);
     TORCH_CHECK(c.dim()==2 && c.size(0)==n && c.size(1)==1,"intensities must have shape [N,1]");
     TORCH_CHECK(H>0 && W>0 && H<=INT_MAX-16 && W<=INT_MAX-16 && int64_t(H)*W<=INT_MAX,"invalid image dimensions");
-    TORCH_CHECK(std::isfinite(bg) && std::abs(bg)<=std::numeric_limits<float>::max() && std::isfinite(tau) && tau>0 && std::isfinite(cutoff) && cutoff>0 && cutoff<1,"invalid background, tau or kernel_cutoff");
+    TORCH_CHECK(std::isfinite(bg) && std::abs(bg)<=std::numeric_limits<float>::max() && std::isfinite(cutoff) && cutoff>0 && cutoff<1,"invalid background or kernel_cutoff");
     double qmax=-2*std::log(cutoff);
     TORCH_CHECK(std::isfinite(transition) && transition>=0 && transition<qmax,"cutoff_transition must be in [0,-2 log(kernel_cutoff))");
     TORCH_CHECK(std::isfinite(jitter) && jitter>=0,"covariance_jitter must be finite and nonnegative");
@@ -62,7 +64,7 @@ static Parameters parameters(const Tensor& m,const Tensor& c,const Tensor& scale
     double cross[3]={a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]};
     double nn=0; for(double v:cross) nn+=v*v;
     TORCH_CHECK(aa>0 && bb>0 && nn>1e-12*aa*bb,"slice pixel axes are degenerate or nearly collinear");
-    return {n,W,H,m.data_ptr<float>(),c.data_ptr<float>(),precomputed?nullptr:scales.data_ptr<float>(),precomputed?nullptr:rot.data_ptr<float>(),precomputed?cov.data_ptr<float>():nullptr,t.data_ptr<float>(),bg,tau,qmax,transition,jitter};
+    return {n,W,H,m.data_ptr<float>(),c.data_ptr<float>(),precomputed?nullptr:scales.data_ptr<float>(),precomputed?nullptr:rot.data_ptr<float>(),precomputed?cov.data_ptr<float>():nullptr,t.data_ptr<float>(),psf.data_ptr<float>(),bg,qmax,transition,jitter};
 }
 // 把 resize_ 封装成 Rasterizer 所需的字节分配回调。
 // 对应 Tensor 存储由 PyTorch 管理，返回的数据指针只在本次调用及缓存存活期内使用。
@@ -72,10 +74,10 @@ static Allocator allocator(Tensor& t) {
 // PyBind 调用的前向入口：设置设备 guard，分配 image/radii/weight_sum 及三块缓存。
 // 返回七项，其中缓存不直接暴露给公开 API，而是交给 autograd ctx 保存。
 // 最后一项是 weight_sum；必须与 Python 解包顺序严格相同。
-ForwardResult RasterizeGaussiansCUDA(const Tensor& m,const Tensor& c,const Tensor& scales,const Tensor& rot,const Tensor& cov,const Tensor& t,
-    int H,int W,double bg,double tau,double cutoff,double transition,double jitter,bool debug) {
+ForwardResult RasterizeGaussiansCUDA(const Tensor& m,const Tensor& c,const Tensor& scales,const Tensor& rot,const Tensor& cov,const Tensor& t,const Tensor& psf,
+    int H,int W,double bg,double cutoff,double transition,double jitter,bool debug) {
     TORCH_CHECK(m.is_cuda(),"means3D must be CUDA"); c10::cuda::CUDAGuard guard(m.device());
-    auto p=parameters(m,c,scales,rot,cov,t,H,W,bg,tau,cutoff,transition,jitter);
+    auto p=parameters(m,c,scales,rot,cov,t,psf,H,W,bg,cutoff,transition,jitter);
     auto out=torch::empty({1,H,W},m.options()),weights=torch::empty_like(out);
     auto radii=torch::zeros({p.count},m.options().dtype(torch::kInt32));
     auto options=m.options().dtype(torch::kUInt8);
@@ -89,11 +91,11 @@ ForwardResult RasterizeGaussiansCUDA(const Tensor& m,const Tensor& c,const Tenso
 }
 // PyBind 调用的反向入口：检查 incoming 与缓存形状/设备，零初始化五类梯度。
 // CUDA 的 atomicAdd 依赖零初始化；empty 分配后直接累加会产生未定义结果。
-BackwardResult RasterizeGaussiansBackwardCUDA(const Tensor& m,const Tensor& c,const Tensor& scales,const Tensor& rot,const Tensor& cov,const Tensor& t,
-    int H,int W,double bg,double tau,double cutoff,double transition,double jitter,bool debug,
+BackwardResult RasterizeGaussiansBackwardCUDA(const Tensor& m,const Tensor& c,const Tensor& scales,const Tensor& rot,const Tensor& cov,const Tensor& t,const Tensor& psf,
+    int H,int W,double bg,double cutoff,double transition,double jitter,bool debug,
     const Tensor& incoming,int instances,const Tensor& geometry,const Tensor& binning,const Tensor& image) {
     TORCH_CHECK(m.is_cuda(),"means3D must be CUDA"); c10::cuda::CUDAGuard guard(m.device());
-    auto p=parameters(m,c,scales,rot,cov,t,H,W,bg,tau,cutoff,transition,jitter);
+    auto p=parameters(m,c,scales,rot,cov,t,psf,H,W,bg,cutoff,transition,jitter);
     tensorCheck(incoming,m,"grad_image");
     TORCH_CHECK(incoming.dim()==3 && incoming.size(0)==1 && incoming.size(1)==H && incoming.size(2)==W,"grad_image shape mismatch");
     TORCH_CHECK(instances>=0,"invalid instance count");
@@ -106,7 +108,8 @@ BackwardResult RasterizeGaussiansBackwardCUDA(const Tensor& m,const Tensor& c,co
     // 始终先产生 packed covariance 梯度，因为尺度/旋转链式求导也以它为中间量。
     // 公开 autograd 会按实际输入路径返回对应梯度，未用分支返回 None。
     auto dS=torch::zeros({p.count,6},m.options());
-    Gradients g{dm.data_ptr<float>(),dc.data_ptr<float>(),dS.data_ptr<float>(),ds.data_ptr<float>(),dr.data_ptr<float>()};
+    auto footprint=torch::zeros({p.count,6},m.options());
+    Gradients g{dm.data_ptr<float>(),dc.data_ptr<float>(),dS.data_ptr<float>(),ds.data_ptr<float>(),dr.data_ptr<float>(),footprint.data_ptr<float>()};
     cudaStream_t stream=c10::cuda::getCurrentCUDAStream(m.get_device()).stream();
     Rasterizer::backward(p,instances,reinterpret_cast<char*>(geometry.data_ptr<uint8_t>()),reinterpret_cast<char*>(binning.data_ptr<uint8_t>()),reinterpret_cast<char*>(image.data_ptr<uint8_t>()),incoming.data_ptr<float>(),g,stream);
     if(debug) cudaCheck(cudaStreamSynchronize(stream));
