@@ -55,6 +55,14 @@ def ssim(img1, img2, window_size=5, size_average=True, sigma=1.5,
 
 def _ssim(img1, img2, window, window_size, channel, size_average=True,
           k1=0.01, k2=0.03, data_range=1.0):
+    values = _ssim_map(img1, img2, window, window_size, channel, k1, k2, data_range)
+    if size_average:
+        return values.mean()
+    return values.mean(1).mean(1).mean(1)
+
+
+def _ssim_map(img1, img2, window, window_size, channel, k1, k2, data_range):
+    """共享未归约 SSIM；局部结构评价保持窗口、零填充及全图归一化。"""
     mu1 = F.conv2d(img1, window, padding=window_size // 2, groups=channel)
     mu2 = F.conv2d(img2, window, padding=window_size // 2, groups=channel)
 
@@ -69,12 +77,8 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True,
     C1 = (k1 * data_range) ** 2
     C2 = (k2 * data_range) ** 2
 
-    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+    return ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
 
-    if size_average:
-        return ssim_map.mean()
-    else:
-        return ssim_map.mean(1).mean(1).mean(1)
 
 def penalize_outside_range(tensor, lower_bound=0.0, upper_bound=1.0):
     error = 0

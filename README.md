@@ -14,6 +14,8 @@ python -m pip install --no-build-isolation .
 ```
 
 需要当前源码的 API_VERSION=3 二进制；详细安装说明见该目录 README。
+本次结构优化还需要渲染库新增的 Python 文件 `local_response.py`，因此已有 API_VERSION=3
+安装也需要同步 Python 包源码；CUDA 算子本次没有改动。本次开发未安装或覆盖环境中的包。
 
 ## 配置和运行
 
@@ -29,7 +31,7 @@ python evaluate.py --config config_test.yaml
 
 保留 Stage2 的 CLI 覆盖，例如 `--control-deformation-mode mls`、`--slice-training-mode random_slice`。
 
-训练与测试默认都读取 `dataset_mode: val`，保持原病例划分；这是逐病例重建评估，不代表对未见病例的泛化。没有对应 PLY 的病例会明确报错，不会在测试中重新训练。`all/train/val` 继续按排序后的全部病例及 `train_fraction` 选择集合；新增的 `test` 根据 NPZ 的 `original_split` 选择官方测试病例。这两种划分方式不同，不保证 `train/val` 与官方 `test` 互斥。评估入口始终排除无有效标签的病例，`test` 模式也执行相同过滤。
+默认数据集为 ACDC，训练读取 `dataset_mode: all`，测试读取 `val`；这是逐病例重建评估，不代表对未见病例的泛化。主入口显式使用读取器的 `dim='3D'` 完整病例接口。没有对应 PLY 的病例会明确报错，不会在测试中重新训练。`all/train/val` 继续按排序后的全部病例及 `train_fraction` 选择集合；新增的 `test` 根据 NPZ 的 `original_split` 选择官方测试病例。这两种划分方式不同，不保证 `train/val` 与官方 `test` 互斥。评估入口始终排除无有效标签的病例，`test` 模式也执行相同过滤。
 
 测试的 `stage1_ply_path` 使用 `{case}` 替换 NPZ 文件主名。输出逐切片 L1、PSNR、SSIM 到 `metrics.csv`，可选保存预测数组和固定显示范围的 PNG。默认指标使用未截断预测；`clamp_predictions` 可显式切换。测试配置的归一化、坐标边界和参考相位应与生成 PLY 时一致。
 
@@ -61,7 +63,24 @@ Stage1 每例保存：
 
 新 PLY 字段为 `x,y,z,intensity,scale_0..2,rot_0..3`；尺度保存为 log 标准差，旋转保存原始 wxyz 四元数。旧灰度 `color_*` 可按 `legacy_color_policy` 迁移，旧 opacity 不再参与模型。两个 stage 均使用此模型格式。
 
-Stage1 默认真实切片无放回均匀采样，支持单层/双层病例。原损失权重不变，插层起点保持原实际行为的 12500 步。`max_num_pts` 默认 200000，是新增的增殖容量限制；不将低强度组织当成低贡献点剪除。
+Stage1 默认真实切片无放回均匀采样，支持单层/双层病例。原损失权重不变，插层起点保持原实际行为的 12500 步。`max_num_pts` 默认 200000，是结构容量上限；不将低强度组织当成低贡献点剪除。
+
+Stage1 使用独立的 `Gaussians/GaussianModel_structural.py`，继承旧模型的属性、PLY、Adam 和学习率接口，原 `GaussianModel_noop.py` 保留。
+结构周期沿用 `densify_from_iter / densify_until_iter / densification_interval`，只替换原增殖调用；正常训练采样、损失、反向传播和 Adam 更新次序不变。
+统一结构目标为全病例真实切片 L1/SSIM、原各向异性惩罚，加 `structural_count_weight*N` 和按观测响应范数归一化的强度 L1 惩罚；新增两项只用于结构验收。
+
+- Birth 从真实观测残差峰生成候选，在对应切片平面定位，继承邻域尺度和方向。
+- Split 沿残差结构方向提出对称子基元，保持初始有符号质量及二阶矩；Merge 对同号且响应高度相关的近邻做矩匹配，异号抵消交给联合 Prune。
+- Prune 评价删除及少量邻居重拟合的实际收益；Swap 联合删除和新增，在容量上限处重新分配基元。
+
+五种操作共用局部响应、SVD/坐标下降强度重拟合及完整目标验收，不执行直接 Clone。
+局部响应匹配正式渲染的四元数激活、PSF、jitter、cutoff 和 transition；SSIM 使用原窗口的完整影响域、边界零填充和全图归一化。
+候选按已接受操作更新后的预测依次评价，最后统一提交参数、统计和 Adam 状态；正式 Renderer 再渲染一次校验，失败则恢复原参数与状态引用。
+未变基元保留动量，新基元动量清零，仅重拟合强度的旧基元重置强度动量。新增行沿用参数组的 Adam step。
+
+`structural_*` 参数集中在训练配置中，控制候选数、局部邻居、响应缓存和支撑预算。超过预算会跳过整个候选，避免截断局部响应造成错误收益。
+默认结构窗口与插层阶段不重叠；若手动配置为重叠，固定 `structural_interp_nodes` 近似随机插层目标的期望，不改变训练随机数流。
+结构验收保证该观测集合上的目标下降；不保证后续随机训练损失单调，也不等于全局最优。有限支撑与原 Renderer 一致，仍是完整 Gaussian 的数值近似。
 
 Stage2 的网络、ODE 和控制点传播数学实现保持原样；仅适配数据、配置、PLY 和共享渲染接口。checkpoint 仍按传播方式和切片训练模式分别保存。
 

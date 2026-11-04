@@ -1,0 +1,7 @@
+# ninja log v7
+2	18116	1793746113076155357	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/ext.o	90603680c05dba07
+16	2174	1793750728732278035	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/forward.o	de271722d0f38371
+15	2231	1793750728731278034	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/backward.o	86108ee972e22885
+2175	9599	1793750730892062347	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/rasterizer_impl.o	4e2a9e88f442fb4a
+2231	26659	1793750730947279095	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/ext.o	fdc6d674fe7a72f7
+9600	91409	1793750738317255566	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/rasterize_points.o	e9b47d16959e9219

@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: diff-gaussian-slice-rendering
+Version: 3.0.0
+Summary: Additive Gaussian fields with analytic slice response
+Requires-Python: >=3.9
+License-File: LICENSE.md
+Dynamic: license-file
+Dynamic: requires-python
+Dynamic: summary

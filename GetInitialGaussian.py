@@ -1,6 +1,6 @@
 import os
 import torch
-from Gaussians.GaussianModel_noop import GaussianModel
+from Gaussians.GaussianModel_structural import GaussianModel
 from Dataloader import dataset
 from CostFunctions import l1_loss, ssim, anisotropic_scale_loss
 from Renderer import render
@@ -223,11 +223,7 @@ def training(args):
                 if (args.densify_from_iter <= iteration < args.densify_until_iter
                         and args.densification_interval > 0
                         and iteration % args.densification_interval == 0):
-                    size = (args.max_screen_size if args.enable_size_pruning
-                            and iteration > args.size_prune_from_iter else None)
-                    gaussians.densify_and_prune(
-                        args.densify_grad_threshold, args.clone_scale_threshold,
-                        args.split_scale_threshold, max_screen_size=size)
+                    gaussians.structural_step(imgs, iteration, rendering, similarity)
             current = {'Total Loss': loss.item(), 'L1 Loss': loss_l1.item(),
                        'SSIM Loss': loss_ssim.item(), 'Aniso': loss_aniso.item(),
                        'L1 interpo': loss_interp_l1.item(), 'ssim inter': loss_interp_ssim.item()}

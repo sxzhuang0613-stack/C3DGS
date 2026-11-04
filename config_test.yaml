@@ -14,7 +14,6 @@ train_fraction: 0.7
 normalization_epsilon: 0.0001
 num_workers: 0
 pin_memory: true
-cmr_layout: "STHW"
 reference_phase: 0
 
 # 归一化模型坐标：XYZ 半边长；旧 PLY 颜色迁移策略

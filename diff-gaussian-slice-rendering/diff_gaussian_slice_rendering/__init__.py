@@ -301,6 +301,16 @@ class _RasterizeGaussians(torch.autograd.Function):
         return dm, dc, ds, dr, None, None
 
 
+def normalize_rotations(rotations):
+    """与 native wxyz 契约一致的可微单位化，供主渲染和局部响应共用。"""
+    # double 分量显式求和，避免平方溢出及部分 CUDA 版本的大批量行归约误差。
+    components = rotations.double().unbind(dim=1)
+    norms = torch.sqrt(sum(component.square() for component in components))
+    if not bool(torch.isfinite(norms).all()) or bool((norms < 1e-12).any()):
+        raise ValueError("rotations must be finite nonzero quaternions")
+    return torch.stack([component / norms for component in components], dim=1).float().contiguous()
+
+
 # 推荐的唯一函数式公开入口。负责互斥输入、shape、设备和 dtype 校验。
 # 在 custom Function 外进行 contiguous 和四元数归一化，使这些操作保留 PyTorch 梯度链。
 def rasterize_gaussians(means3D, intensities, raster_settings, *,
@@ -334,16 +344,7 @@ def rasterize_gaussians(means3D, intensities, raster_settings, *,
     if cov3Ds_precomp is None:
         if scales.shape != (n, 3) or rotations.shape != (n, 4):
             raise ValueError("scales/rotations must have shapes [N,3]/[N,4]")
-        # 使用 double 求四元数范数，降低 float32 平方和的溢出风险。
-        # 零四元数没有有效方向，直接报错；非零四元数先单位化再转换回 float32。
-        # CUDA 返回对单位四元数的梯度，PyTorch 再通过除以范数的运算传播到原始参数。
-        # 固定四分量显式求和，避免部分 PyTorch/CUDA 版本的大批量 float64 行归约错误。
-        # 与二范数数学等价，保留 double 防溢出及完整自动求导链。
-        components = rotations.double().unbind(dim=1)
-        norms = torch.sqrt(sum(component.square() for component in components))
-        if not bool(torch.isfinite(norms).all()) or bool((norms < 1e-12).any()):
-            raise ValueError("rotations must be finite nonzero quaternions")
-        rotations = torch.stack([component / norms for component in components], dim=1).float().contiguous()
+        rotations = normalize_rotations(rotations)
         scales = scales.contiguous()
         cov = empty
     else:

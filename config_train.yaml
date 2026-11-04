@@ -16,7 +16,6 @@ train_fraction: 0.7
 normalization_epsilon: 0.0001
 num_workers: 0
 pin_memory: true
-cmr_layout: "STHW"
 reference_phase: 0
 
 # 归一化模型坐标：XYZ 半边长；旧 PLY 颜色迁移策略
@@ -75,6 +74,8 @@ roi_jitter_factor: 0.5
 position_lr_init: 0.00016
 position_lr_final: 1.6e-05
 position_lr_max_steps: 30000
+# 兼容现有位置调度器；其 delay_steps 默认 0，学习率曲线保持不变
+position_lr_delay_mult: 0.01
 intensity_lr: 0.0025
 scaling_lr: 0.005
 rotation_lr: 0.001
@@ -100,20 +101,31 @@ lambda_interp_ssim: 0.1
 anisotropic_max_ratio: 6.0
 anisotropic_epsilon: 1.0e-06
 
-# 增殖、分裂与可选尺寸剪枝
+# 结构操作调度，保留原调用起止点及间隔
 densify_from_iter: 1000
 densify_until_iter: 12500
 densification_interval: 200
-densify_grad_threshold: 0.0005
-clone_scale_threshold: 0.01
-split_scale_threshold: 0.05
-split_children: 2
-split_shrink_factor: 0.63
-force_split_factor: 2.5
-enable_size_pruning: false
-size_prune_from_iter: 2500
-max_screen_size: 5.0
-world_prune_factor: 5.0
+
+# 统一结构验收；不加入正常 Adam 的训练损失
+structural_count_weight: 1.0e-06
+structural_amplitude_weight: 1.0e-05
+structural_min_points: 1
+structural_candidates: 8
+structural_max_accept: 8
+structural_neighbors: 4
+structural_peak_window: 5
+structural_split_fraction: 0.35
+structural_merge_correlation: 0.98
+structural_refit_steps: 16
+structural_rank_rtol: 1.0e-06
+# 所有被调整邻居的完整支撑并集超过预算时放弃候选，不截短响应
+structural_patch_budget: 65536
+structural_cache_mb: 64
+structural_min_gain: 1.0e-07
+structural_verify_atol: 2.0e-05
+structural_verify_rtol: 2.0e-05
+# 仅在结构窗口与插层阶段重叠时启用固定求积节点，不消耗训练随机数
+structural_interp_nodes: [0.25, 0.5, 0.75]
 
 # Stage2 网络与控制点参数（不改变 motion 算法）
 evolution_hidden_dim: 128
