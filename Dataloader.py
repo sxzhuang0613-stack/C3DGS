@@ -171,6 +171,14 @@ class dataset(Dataset):
             raise ValueError(f'{patient}: 标签必须为 0、1、2、3')
         source_spatial_shape = tuple(cmr.shape[-2:])
         output_size = (128, 128)
+        # crop 不改变 spacing；仅按实际输入 H/W 修正 resize 后的面内间距。
+        source_spacing = torch.tensor(
+            metadata['source']['files']['cmr_4d']['zooms'][:3], dtype=torch.float64)
+        if source_spacing.shape != (3,) or not torch.isfinite(source_spacing).all() or (source_spacing <= 0).any():
+            raise ValueError(f'{patient}: CMR spacing 必须为三个有限正数，顺序为 XYZ')
+        spacing = source_spacing * source_spacing.new_tensor([
+            source_spatial_shape[1]/output_size[1],
+            source_spatial_shape[0]/output_size[0], 1.])
         # 仅缩放 H/W；先处理完整病例，使 2D 与 3D 的对应像素一致。
         cmr = self.normalize_data(cmr)
         label = self.label_map[label.long()]
@@ -196,6 +204,8 @@ class dataset(Dataset):
             'label_layout': 'PHW' if self.dim == '2D' else 'SPHW',
             'source_spatial_shape': torch.tensor(source_spatial_shape),
             'spatial_shape': torch.tensor(output_size),
+            'source_spacing_xyz': source_spacing,
+            'spacing_xyz': spacing,
             'time_indices': time_indices,
             'phase_names': annotation['phase_names'],
             'has_labels': label.shape[-3] > 0,

@@ -408,6 +408,7 @@ class MainInterfaceTests(unittest.TestCase):
             info = {'schema':{'array_axes':{'cmr':['T','Z','Y','X'],'labels':['phase','Z','Y','X']}},
                     'case':{'case_id':'sample','original_split':'Testing'},
                     'annotation':{'time_indices':[0,2],'phase_names':['ED','ES'],'has_labels':True,'phase_metadata_valid':True},
+                    'source':{'files':{'cmr_4d':{'zooms':[1.,1.,8.,1.]}}},
                     'processing':{'output':{'cmr_shape':[3,2,4,4],'labels_shape':[2,2,4,4]}}}
             np.savez_compressed(Path(directory)/'sample.npz',cmr=np.arange(96).reshape(3,2,4,4),
                                 labels=np.zeros((2,2,4,4),dtype=np.uint8),info=json.dumps(info))

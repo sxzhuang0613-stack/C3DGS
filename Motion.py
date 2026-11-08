@@ -2,6 +2,7 @@ import os
 import random
 import re
 import csv
+import json
 import numpy as np
 import torch
 import argparse
@@ -15,7 +16,8 @@ from Gaussians.GaussianEvolution import GaussianEvolutionNetwork
 from Dataloader import dataset
 from CostFunctions import l1_loss, ssim
 from Renderer import render
-from config_utils import load_config, setup_runtime, dataset_options, render_options, ssim_options
+from config_utils import load_config, setup_runtime, dataset_options, ssim_options
+from case_geometry import make_geometry, check_geometry, attach_geometry, read_model_geometry
 
 
 MOTION_CODE_VERSION = "20260917_control_graph_slice_training_modes_v9"
@@ -239,13 +241,14 @@ def build_optimizer(evolution_net, args):
 
 
 def save_checkpoint(path, evolution_net, optimizer, scheduler, iteration, args,
-                    history_iters, history_losses_dict):
+                    history_iters, history_losses_dict, geometry=None):
     torch.save({
         'iteration': iteration,
         'model': evolution_net.state_dict(),
         'optimizer': optimizer.state_dict(),
         'scheduler': scheduler.state_dict(),
         'config': vars(args),
+        'geometry': geometry,
         'loss_history': {
             'iterations': history_iters,
             'losses': history_losses_dict,
@@ -253,8 +256,13 @@ def save_checkpoint(path, evolution_net, optimizer, scheduler, iteration, args,
     }, path)
 
 
-def load_checkpoint(path, evolution_net, optimizer=None, scheduler=None):
+def load_checkpoint(path, evolution_net, optimizer=None, scheduler=None, geometry=None):
     checkpoint = torch.load(path, map_location=next(evolution_net.parameters()).device, weights_only=False)
+    if geometry is not None:
+        if checkpoint.get('geometry') is not None:
+            check_geometry(checkpoint['geometry'],geometry)
+        elif geometry['version'] != 0:
+            raise ValueError('旧 Stage2 checkpoint 缺少新坐标记录，请使用独立输出目录')
     if 'model' not in checkpoint:
         evolution_net.load_state_dict(checkpoint)
         return 0, [], {}
@@ -274,7 +282,7 @@ def load_checkpoint(path, evolution_net, optimizer=None, scheduler=None):
 
 
 def export_motion_sequence(evolution_net, base_xyz, base_scaling, base_rotation,
-                           time_steps, num_ode_steps, save_path):
+                           time_steps, num_ode_steps, save_path, geometry=None):
     """导出高斯轨迹，并区分运动 Jacobian 与高斯支撑体积比。"""
     evolution_net.eval()
     xyz_sequence = []
@@ -308,6 +316,7 @@ def export_motion_sequence(evolution_net, base_xyz, base_scaling, base_rotation,
         save_path,
         time=np.linspace(0.0, 1.0, time_steps, dtype=np.float32),
         reference_xyz=base_xyz.detach().cpu().numpy(),
+        geometry_json=np.asarray(json.dumps(geometry)),
         xyz=np.stack(xyz_sequence, axis=0),
         displacement=np.stack(displacement_sequence, axis=0),
         flow_jacobian_det=np.stack(flow_jacobian_sequence, axis=0),
@@ -328,13 +337,20 @@ def export_motion_sequence(evolution_net, base_xyz, base_scaling, base_rotation,
 
 
 def export_dense_flow(evolution_net, time_steps, num_slices, height, width,
-                      num_ode_steps, chunk_size, save_path):
+                      num_ode_steps, chunk_size, save_path, geometry=None):
     """在成像切片网格上查询参考相位到所有相位的稠密拉格朗日位移。"""
     device = next(evolution_net.parameters()).device
     dtype = next(evolution_net.parameters()).dtype
     coordinate_z = torch.linspace(-1.0, 1.0, num_slices, device=device, dtype=dtype)
     coordinate_y = torch.linspace(-1.0, 1.0, height, device=device, dtype=dtype)
     coordinate_x = torch.linspace(-1.0, 1.0, width, device=device, dtype=dtype)
+    if geometry is not None and geometry['version'] == 1:
+        # 只适配查询坐标和像素单位；运动积分与变形模型保持不变。
+        bx,by,bz = geometry['bounds']
+        coordinate_x = ((torch.arange(width,device=device,dtype=dtype)+.5)*2/width-1)*bx
+        coordinate_y = ((torch.arange(height,device=device,dtype=dtype)+.5)*2/height-1)*by
+        coordinate_z = (torch.linspace(-bz,bz,num_slices,device=device,dtype=dtype)
+                        if num_slices > 1 else torch.zeros(1,device=device,dtype=dtype))
     grid_z, grid_y, grid_x = torch.meshgrid(
         coordinate_z, coordinate_y, coordinate_x, indexing='ij'
     )
@@ -365,10 +381,10 @@ def export_dense_flow(evolution_net, time_steps, num_slices, height, width,
 
         phase_displacement = torch.cat(phase_displacement, dim=0)
         phase_displacement = phase_displacement.reshape(num_slices, height, width, 3)
-        pixel_flow = torch.stack([
-            phase_displacement[..., 0] * max(1, width - 1) / 2.0,
-            phase_displacement[..., 1] * max(1, height - 1) / 2.0,
-        ], dim=1)
+        factors = ([width/(2*bx),height/(2*by)] if geometry is not None and geometry['version']==1
+                   else [max(1,width-1)/2,max(1,height-1)/2])
+        pixel_flow = torch.stack([phase_displacement[...,0]*factors[0],
+                                 phase_displacement[...,1]*factors[1]],dim=1)
         pixel_flow_sequence.append(pixel_flow.numpy())
         through_plane_sequence.append(phase_displacement[..., 2].numpy())
 
@@ -376,6 +392,7 @@ def export_dense_flow(evolution_net, time_steps, num_slices, height, width,
         save_path,
         time=np.linspace(0.0, 1.0, time_steps, dtype=np.float32),
         flow_pixel=np.stack(pixel_flow_sequence, axis=0),
+        geometry_json=np.asarray(json.dumps(geometry)),
         through_plane_normalized=np.stack(through_plane_sequence, axis=0),
         motion_dimension=np.asarray(evolution_net.motion_dimension),
         control_deformation_mode=np.asarray(
@@ -390,7 +407,6 @@ def export_dense_flow(evolution_net, time_steps, num_slices, height, width,
 
 def training(args):
     setup_runtime(args)
-    rendering = render_options(args)
     similarity = ssim_options(args)
     tqdm.write(f"Motion code version: {MOTION_CODE_VERSION}")
     slice_training_mode = str(args.stage2_slice_training_mode).lower()
@@ -441,9 +457,6 @@ def training(args):
         outputs_complete = expected_outputs and all(
             os.path.exists(path) for path in expected_outputs
         )
-        if args.stage2_skip_existing and outputs_complete:
-            tqdm.write(f"[{sample_name}] 已存在完整运动结果，跳过。")
-            continue
 
         tqdm.write("\n==================================================")
         tqdm.write(f"开始处理 Case [{sample_idx + 1}/{total_cases}]: {sample_name}")
@@ -470,7 +483,23 @@ def training(args):
 
         BaseGaussians = GaussianModel()
         tqdm.write(f"读取第一阶段高斯检查点: {stage1_ply_path}")
-        BaseGaussians.bounds = args.bounds
+        record = read_model_geometry(stage1_ply_path)
+        geometry = record['geometry'] if record else make_geometry(
+            data['info']['spacing_xyz'][0],(num_slices,height,width),args,legacy=True)
+        check_geometry(geometry,make_geometry(data['info']['spacing_xyz'][0],
+            (num_slices,height,width),args,legacy=geometry['version']==0))
+        attach_geometry(BaseGaussians,geometry)
+        rendering = geometry['rendering']
+        if args.stage2_skip_existing and outputs_complete:
+            for path in expected_outputs:
+                with np.load(path,allow_pickle=False) as arrays:
+                    saved = json.loads(arrays['geometry_json'].item()) if 'geometry_json' in arrays else None
+                if saved is None and geometry['version'] != 0:
+                    raise ValueError('旧运动结果缺少新坐标记录，请使用独立输出目录')
+                if saved is not None:
+                    check_geometry(saved,geometry)
+            tqdm.write(f"[{sample_name}] 已存在几何一致的完整运动结果，跳过。")
+            continue
         BaseGaussians.load_ply(stage1_ply_path, legacy_color_policy=args.legacy_color_policy,
                                device=args.device)
         tqdm.write(f"成功加载第一阶段高斯: {BaseGaussians.get_xyz.shape[0]} 个点。")
@@ -513,7 +542,7 @@ def training(args):
         history_losses_dict = {}
         if args.stage2_resume and os.path.exists(checkpoint_path):
             start_iteration, history_iters, history_losses_dict = load_checkpoint(
-                checkpoint_path, evolution_net, optimizer_net, scheduler
+                checkpoint_path, evolution_net, optimizer_net, scheduler, geometry=geometry
             )
             tqdm.write(f"从第 {start_iteration} 次迭代继续训练。")
 
@@ -690,7 +719,7 @@ def training(args):
                 save_checkpoint(
                     checkpoint_path, evolution_net, optimizer_net,
                     scheduler, iter_i, args,
-                    history_iters, history_losses_dict
+                    history_iters, history_losses_dict, geometry=geometry
                 )
 
         if start_iteration >= stage2_iters:
@@ -700,7 +729,7 @@ def training(args):
             export_motion_sequence(
                 evolution_net, base_xyz, base_scaling, base_rotation,
                 time_steps=time_steps, num_ode_steps=num_ode_steps,
-                save_path=motion_path,
+                save_path=motion_path, geometry=geometry,
             )
             tqdm.write(f"运动结果已保存至: {motion_path}")
 
@@ -711,7 +740,7 @@ def training(args):
                 height=height, width=width,
                 num_ode_steps=num_ode_steps,
                 chunk_size=args.dense_flow_chunk_size,
-                save_path=dense_flow_path,
+                save_path=dense_flow_path, geometry=geometry,
             )
             tqdm.write(f"稠密运动场已保存至: {dense_flow_path}")
 

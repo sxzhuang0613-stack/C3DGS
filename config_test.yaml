@@ -16,7 +16,7 @@ num_workers: 0
 pin_memory: true
 reference_phase: 0
 
-# 归一化模型坐标：XYZ 半边长；旧 PLY 颜色迁移策略
+# 仅用于无几何记录的旧 PLY；新模型读取旁置几何记录
 bounds: [1.0, 1.0, 1.0]
 legacy_color_policy: "strict"
 

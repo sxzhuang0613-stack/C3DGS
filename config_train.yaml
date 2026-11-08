@@ -18,7 +18,7 @@ num_workers: 0
 pin_memory: true
 reference_phase: 0
 
-# 归一化模型坐标：XYZ 半边长；旧 PLY 颜色迁移策略
+# 仅作为无几何记录旧模型的坐标；新模型的 bounds 从 spacing 自动生成
 bounds: [1.0, 1.0, 1.0]
 legacy_color_policy: "strict"
 
@@ -64,11 +64,27 @@ plot_dpi: 150
 # Stage1 初始化与增殖容量上限
 num_pts: 50000
 max_num_pts: 200000
-intensity_init: 0.6410473958869392
-initial_z_scale: 2.0
-initial_distance_floor: 1.0e-07
-roi_layout: "SHW"
-roi_jitter_factor: 0.5
+init_uniform_fraction: 0.5
+init_foreground_fraction: 0.3
+# 边缘比例为 1-uniform-foreground
+init_foreground_threshold: 0.05
+init_sampling_quantiles: [0.01, 0.99]
+init_foreground_dilation: 2
+init_edge_sigma: 1.0
+init_edge_truncate: 3.0
+init_edge_quantile: 0.8
+init_grid_jitter: 0.35
+init_normal_jitter: 0.45
+init_coarse_fraction: 0.2
+init_fine_sigma_pixels: 1.25
+init_coarse_sigma_pixels: 2.5
+init_normal_sigma_spacing: 0.4
+init_normal_floor_pixels: 0.5
+init_max_axis_ratio: 5.0
+init_support_retries: 3
+init_fit_steps: 20
+init_cg_rtol: 0.001
+init_ridge_relative: 0.0001
 
 # Stage1 优化器与位置学习率
 position_lr_init: 0.00016

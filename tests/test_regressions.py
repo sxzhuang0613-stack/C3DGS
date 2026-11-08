@@ -31,7 +31,7 @@ class ConfigTests(unittest.TestCase):
     def test_configs_have_numeric_optimizer_and_renderer_values(self):
         from config_utils import load_config
         args = load_config(ROOT / 'config_train.yaml')
-        for key in ('adam_eps', 'stage2_adam_eps', 'covariance_jitter', 'initial_distance_floor'):
+        for key in ('adam_eps', 'stage2_adam_eps', 'covariance_jitter', 'init_ridge_relative'):
             self.assertIsInstance(getattr(args, key), float)
         self.assertEqual(args.interpolate_iter, 12500)
         self.assertGreaterEqual(args.max_num_pts, args.num_pts)
@@ -60,8 +60,10 @@ class ConfigTests(unittest.TestCase):
         from config_utils import load_config
         for config, files in (
             ('config_train.yaml', ['GetInitialGaussian.py', 'Motion.py', 'temp.py',
-                                   'Gaussians/GaussianModel_noop.py', 'config_utils.py']),
-            ('config_test.yaml', ['evaluate.py', 'config_utils.py']),
+                                   'Gaussians/GaussianModel_noop.py', 'config_utils.py',
+                                   'Gaussians/initialization.py', 'Gaussians/GaussianModel_structural.py',
+                                   'case_geometry.py']),
+            ('config_test.yaml', ['evaluate.py', 'config_utils.py', 'case_geometry.py']),
         ):
             args = load_config(ROOT / config)
             used = set()

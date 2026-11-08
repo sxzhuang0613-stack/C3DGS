@@ -35,6 +35,7 @@ class DataloaderTests(unittest.TestCase):
             'annotation': {'time_indices': [] if empty else [0, 2],
                            'phase_names': [] if empty else ['ED', 'ES'],
                            'has_labels': not empty, 'phase_metadata_valid': valid},
+            'source': {'files': {'cmr_4d': {'zooms': [1.5,1.2,10.,1.]}}},
             'processing': {'output': {'cmr_shape': list(cmr.shape),
                                       'labels_shape': list(labels.shape)}},
             'optional_metadata': None,
@@ -66,6 +67,16 @@ class DataloaderTests(unittest.TestCase):
         batch = next(iter(torch.utils.data.DataLoader(self.load(), batch_size=1)))
         self.assertEqual(batch['info']['filename'], ['case.npz'])
         self.assertIsNone(json.loads(batch['info']['metadata'][0])['optional_metadata'])
+        torch.testing.assert_close(volume['info']['source_spacing_xyz'],torch.tensor([1.5,1.2,10.],dtype=torch.float64))
+        torch.testing.assert_close(volume['info']['spacing_xyz'],torch.tensor([1.5*2/128,1.2*2/128,10.],dtype=torch.float64))
+        torch.testing.assert_close(slices[0]['info']['spacing_xyz'],volume['info']['spacing_xyz'])
+
+    def test_rectangular_crop_resize_preserves_physical_field(self):
+        self.labels = np.zeros((2,2,80,100),dtype=np.uint8)
+        self.save_case('rectangular',cmr=np.ones((3,2,80,100),dtype=np.float32))
+        spacing = self.load()[0]['info']['spacing_xyz']
+        torch.testing.assert_close(spacing,torch.tensor([1.171875,.75,10.],dtype=torch.float64))
+        torch.testing.assert_close(spacing[:2]*128,torch.tensor([150.,96.],dtype=torch.float64))
 
     def test_class_mapping_matches_acdc(self):
         self.save_case('case')

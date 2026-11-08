@@ -20,15 +20,16 @@ def slice_tv_loss(images):
         return images.new_zeros(())
     return torch.abs(images[1:] - images[:-1]).mean()
 
-def anisotropic_scale_loss(scales, max_ratio=6.0, eps=1e-6):
-    """仅惩罚超过允许范围的高斯长短轴比例。"""
+def anisotropic_scale_loss(scales, max_ratio=6.0, eps=1e-6, reference_count=None):
+    """固定参考容量避免 Birth 稀释正则；未指定时保持旧接口的均值。"""
     if scales.numel() == 0:
         return scales.new_zeros(())
 
     max_scale = torch.max(scales, dim=-1).values
     min_scale = torch.min(scales, dim=-1).values.clamp_min(eps)
     scale_ratio = max_scale / min_scale
-    return torch.mean(F.relu(scale_ratio / max_ratio - 1.0) ** 2)
+    penalty = F.relu(scale_ratio / max_ratio - 1.0) ** 2
+    return penalty.sum()/(scales.shape[0] if reference_count is None else reference_count)
 
 # ============ ssim =========================
 

@@ -33,9 +33,25 @@ def load_config(path):
         for key in ('iters', 'checkpoint_interval', 'loss_plot_interval', 'status_interval',
                     'real_slices_per_iter', 'num_pts', 'interp_step_size',
                     'stage2_iters', 'stage2_save_interval', 'stage2_loss_plot_interval',
-                    'initial_z_scale', 'initial_distance_floor'):
+                    'init_edge_sigma', 'init_edge_truncate', 'init_fine_sigma_pixels', 'init_coarse_sigma_pixels',
+                    'init_normal_sigma_spacing', 'init_normal_floor_pixels', 'init_ridge_relative'):
             if values[key] <= 0:
                 raise ValueError(f'{key} 必须大于零')
+        if not (0 <= values['init_uniform_fraction'] <= 1
+                and 0 <= values['init_foreground_fraction'] <= 1-values['init_uniform_fraction']):
+            raise ValueError('初始化均匀/前景比例非负且总和不能超过 1')
+        quantiles = values['init_sampling_quantiles']
+        if len(quantiles) != 2 or not 0 <= quantiles[0] < quantiles[1] <= 1:
+            raise ValueError('初始化采样分位数必须为 [low,high]，满足 0 <= low < high <= 1')
+        for key in ('init_foreground_threshold','init_edge_quantile','init_coarse_fraction'):
+            if not 0 <= values[key] <= 1:
+                raise ValueError(f'{key} 必须位于 [0,1]')
+        for key in ('init_foreground_dilation','init_fit_steps','init_support_retries'):
+            if not isinstance(values[key],int) or values[key] < 0:
+                raise ValueError(f'{key} 必须为非负整数')
+        if not (0 <= values['init_grid_jitter'] < .5 and 0 < values['init_normal_jitter'] <= .5
+                and 0 < values['init_cg_rtol'] < 1 and values['init_max_axis_ratio'] >= 1):
+            raise ValueError('初始化抖动、CG 容差或轴比配置非法')
         if not 1 <= values['structural_min_points'] <= values['num_pts'] <= values['max_num_pts']:
             raise ValueError('结构容量需要 1 <= min_points <= num_pts <= max_num_pts')
         if not 0 < values['structural_split_fraction'] < 1:

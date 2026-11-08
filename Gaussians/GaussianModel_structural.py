@@ -39,6 +39,15 @@ class GaussianModel(BaseGaussianModel):
     def training_setup(self, args):
         super().training_setup(args)
         self.structural_args = args
+        if not hasattr(self, 'geometry_reference_count'):
+            self.geometry_reference_count = len(self.get_xyz)
+        for group in self.optimizer.param_groups:
+            group['eps'] = args.adam_eps
+            group['betas'] = tuple(args.adam_betas)
+
+    def initialize_from_images(self, images, geometry, args, rendering, case_name):
+        from .initialization import initialize_from_images
+        return initialize_from_images(self,images,geometry,args,rendering,case_name)
 
     def InitializeGaussians(self, num_pts=50000, bounds=(1.,1.,1.), roi_mask=None,
                             intensity_init=0.6410473958869391, roi_layout='SHW',
@@ -177,6 +186,7 @@ class GaussianStructuralOptimizer:
     def __init__(self, model, images, render_kwargs, similarity_kwargs, iteration):
         self.model, self.args = model, model.structural_args
         self.original_count = len(model.get_xyz)
+        self.geometry_reference_count = model.geometry_reference_count
         self.render_kwargs, self.similarity = render_kwargs, similarity_kwargs
         self.device = model.get_xyz.device
         self.height, self.width = images.shape[-2:]
@@ -553,7 +563,7 @@ class GaussianStructuralOptimizer:
         objective_delta = (self.image_delta(indices,delta)
                            + self.args.structural_count_weight*(count-self.count)
                            + self.args.structural_amplitude_weight*amplitude_delta
-                           + self.args.lambda_anisotropic*(gsum/count-self.gsum/self.count))
+                           + self.args.lambda_anisotropic*(gsum-self.gsum)/self.geometry_reference_count)
         if not bool(objective_delta < -self.args.structural_min_gain):
             return False
         self.prediction.flatten()[indices] += delta
@@ -585,7 +595,7 @@ class GaussianStructuralOptimizer:
                 actual = self.render_all()
                 regularization = (self.args.structural_count_weight*(self.count-before)
                                   + self.args.structural_amplitude_weight*self.sparsity_delta
-                                  + self.args.lambda_anisotropic*(self.gsum/self.count-self.start_gsum/before))
+                                  + self.args.lambda_anisotropic*(self.gsum-self.start_gsum)/self.geometry_reference_count)
                 delta_j = self.image_loss(actual)-start_loss+regularization
                 consistent = torch.allclose(actual,self.prediction,
                                             atol=self.args.structural_verify_atol,rtol=self.args.structural_verify_rtol)

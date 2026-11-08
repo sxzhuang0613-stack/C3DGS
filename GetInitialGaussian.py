@@ -7,7 +7,8 @@ from Renderer import render
 import argparse
 import random
 import numpy as np
-from config_utils import load_config, setup_runtime, dataset_options, render_options, ssim_options
+from config_utils import load_config, setup_runtime, dataset_options, ssim_options
+from case_geometry import make_geometry, check_geometry, attach_geometry, save_model_ply, read_model_geometry
 from tqdm import tqdm
 
 import matplotlib
@@ -48,7 +49,6 @@ def update_loss_plot(out_dir, iters_list, loss_dict, dpi=150):
     plt.savefig(plot_path, dpi=dpi)
     plt.close('all')
 
-
 # ==================== [功能模块 2: 周期性全序列快照重建 (含插帧联动)] ====================
 def reconstruct_full_case(Gaussians, s, h, w, out_dir, iter_num, include_interp, step_size=0.5, **render_kwargs):
     """重建当前模型在整个 Case 下的所有切片。如果已进入插帧期，将自动采用亚像素步长进行细分插帧"""
@@ -78,11 +78,12 @@ def reconstruct_full_case(Gaussians, s, h, w, out_dir, iter_num, include_interp,
     plt.close('all')
     torch.cuda.empty_cache()
 
-
 def save_training_checkpoint(path, gaussians, iteration, history_iters, history_losses, args):
     """保存拓扑、Adam 动量、增殖统计和随机状态；PLY 只用于交换模型。"""
     state = {
         'iteration': iteration, 'config': vars(args),
+        'geometry': getattr(gaussians,'geometry',None),
+        'geometry_reference_count': getattr(gaussians,'geometry_reference_count',len(gaussians.get_xyz)),
         'parameters': {name: getattr(gaussians, name).detach() for name in
                        ('_xyz', '_intensity', '_scaling', '_rotation')},
         'optimizer': gaussians.optimizer.state_dict(),
@@ -95,10 +96,12 @@ def save_training_checkpoint(path, gaussians, iteration, history_iters, history_
     torch.save(state, path + '.tmp')
     os.replace(path + '.tmp', path)
 
-
 def restore_training_checkpoint(state, gaussians, args):
+    if state.get('geometry') is not None:
+        attach_geometry(gaussians,state['geometry'])
     for name, tensor in state['parameters'].items():
         setattr(gaussians, name, torch.nn.Parameter(tensor.to(args.device)))
+    gaussians.geometry_reference_count = state.get('geometry_reference_count',len(gaussians.get_xyz))
     gaussians.training_setup(args)
     gaussians.optimizer.load_state_dict(state['optimizer'])
     for name, tensor in state['statistics'].items():
@@ -108,6 +111,19 @@ def restore_training_checkpoint(state, gaussians, args):
     torch.set_rng_state(state['torch'].cpu())
     torch.cuda.set_rng_state_all([value.cpu() for value in state['cuda']])
 
+def check_resume_config(saved, args):
+    # 允许延长训练和改变输出频率；优化目标或 Adam 参数改变时应参数热启动。
+    keys = ('position_lr_init','position_lr_final','position_lr_max_steps','position_lr_delay_mult',
+            'intensity_lr','scaling_lr','rotation_lr','adam_eps','adam_betas',
+            'log_scale_min','log_scale_max','real_slices_per_iter','interpolation',
+            'interpolate_iter','interpolation_probability','interpolation_alpha_min',
+            'interpolation_alpha_max','anisotropic_max_ratio','anisotropic_epsilon',
+            'densify_from_iter','densify_until_iter','densification_interval','max_num_pts',
+            'lambda_l1','lambda_ssim','lambda_anisotropic','lambda_interp_l1','lambda_interp_ssim')
+    keys = set(keys)|{key for key in vars(args) if key.startswith('structural_')}
+    changed = sorted(key for key in keys if key in saved and saved[key] != getattr(args,key))
+    if changed:
+        raise ValueError(f'续训配置改变了优化条件 {changed}；请使用独立实验或 PLY 参数热启动')
 
 def training(args):
     setup_runtime(args)
@@ -115,7 +131,6 @@ def training(args):
         dataset(mode=args.dataset_mode, **dataset_options(args)),
         batch_size=1, num_workers=args.num_workers, pin_memory=args.pin_memory,
     )
-    rendering = render_options(args)
     similarity = ssim_options(args)
     for sample_idx, data in enumerate(loader):
         sample_name = os.path.splitext(data['info']['filename'][0])[0]
@@ -126,20 +141,48 @@ def training(args):
         if (args.stage1_resume or args.stage1_skip_existing) and os.path.isfile(checkpoint_path):
             # 只加载本地可信训练文件；完整随机状态包含 NumPy 对象。
             state = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-        if (args.stage1_skip_existing and state is not None
-                and state['iteration'] >= args.iters
-                and (not args.save_ply or os.path.isfile(final_ply))):
-            tqdm.write(f'[{sample_name}] 已完成 {state["iteration"]} 步，跳过。')
-            continue
-        os.makedirs(case_dir, exist_ok=True)
+        skip_existing = (args.stage1_skip_existing and state is not None
+                         and state['iteration'] >= args.iters
+                         and (not args.save_ply or os.path.isfile(final_ply)))
+        if skip_existing and args.save_ply and state.get('geometry') is not None:
+            final_record = read_model_geometry(final_ply)
+            skip_existing = final_record is not None and final_record.get('iteration') == state['iteration']
+            if skip_existing:
+                check_geometry(state['geometry'],final_record['geometry'])
+        if state is not None and (args.stage1_resume or skip_existing):
+            check_resume_config(state['config'],args)
         sequence = data['cmr'][0]
         imgs = sequence[:, args.reference_phase].to(args.device)
         s, h, w = imgs.shape
+        record = None
+        if state is not None and (args.stage1_resume or skip_existing):
+            geometry = state.get('geometry')
+            if geometry is None:
+                # 无几何记录的旧 checkpoint 继续使用旧盒子，不解释为 spacing 坐标。
+                old_args = argparse.Namespace(**state['config'])
+                geometry = make_geometry(data['info']['spacing_xyz'][0],imgs.shape,old_args,legacy=True)
+                tqdm.write(f'[{sample_name}] 旧 checkpoint：保留 legacy_box 坐标。')
+        elif args.warm_start_ply_path:
+            record = read_model_geometry(args.warm_start_ply_path)
+            geometry = record['geometry'] if record else make_geometry(
+                data['info']['spacing_xyz'][0],imgs.shape,args,legacy=True)
+            if record is None:
+                tqdm.write(f'[{sample_name}] 无几何记录的旧 PLY：保留 legacy_box 坐标。')
+        else:
+            geometry = make_geometry(data['info']['spacing_xyz'][0],imgs.shape,args)
+        current = make_geometry(data['info']['spacing_xyz'][0],imgs.shape,args,legacy=geometry['version']==0)
+        check_geometry(geometry,current)
+        rendering = geometry['rendering']
+        if skip_existing:
+            tqdm.write(f'[{sample_name}] 已完成 {state["iteration"]} 步，跳过。')
+            continue
+        os.makedirs(case_dir, exist_ok=True)
         gaussians = GaussianModel()
-        gaussians.bounds = args.bounds
+        attach_geometry(gaussians,geometry)
         history_iters, history_losses = [], {}
         start_iteration = 0
         if args.stage1_resume and state is not None:
+            tqdm.write(f'[{sample_name}] 续训已有参数，初始化不重新执行。')
             restore_training_checkpoint(state, gaussians, args)
             start_iteration = state['iteration']
             history_iters = state['history_iters']
@@ -148,15 +191,10 @@ def training(args):
             if args.warm_start_ply_path:
                 gaussians.load_ply(args.warm_start_ply_path,
                                    legacy_color_policy=args.legacy_color_policy, device=args.device)
+                if record is not None:
+                    gaussians.geometry_reference_count = record['geometry_reference_count']
             else:
-                roi = data['roi_mask'][0].to(args.device) if 'roi_mask' in data else None
-                gaussians.InitializeGaussians(
-                    num_pts=args.num_pts, bounds=args.bounds, roi_mask=roi,
-                    intensity_init=args.intensity_init, roi_layout=args.roi_layout,
-                    roi_jitter_factor=args.roi_jitter_factor,
-                    initial_z_scale=args.initial_z_scale,
-                    initial_distance_floor=args.initial_distance_floor,
-                )
+                gaussians.initialize_from_images(imgs,geometry,args,rendering,sample_name)
             gaussians.training_setup(args)
 
         with torch.no_grad():
@@ -176,7 +214,8 @@ def training(args):
             loss_l1 = l1_loss(predictions, targets)
             loss_ssim = 1 - ssim(predictions, targets, **similarity)
             loss_aniso = anisotropic_scale_loss(
-                gaussians.get_scaling, args.anisotropic_max_ratio, args.anisotropic_epsilon)
+                gaussians.get_scaling, args.anisotropic_max_ratio, args.anisotropic_epsilon,
+                reference_count=gaussians.geometry_reference_count)
             loss_interp_l1 = imgs.new_zeros(())
             loss_interp_ssim = imgs.new_zeros(())
             if args.interpolation and iteration >= args.interpolate_iter and s > 1:
@@ -240,12 +279,12 @@ def training(args):
                     args.interpolation and iteration >= args.interpolate_iter,
                     args.interp_step_size, **rendering)
             if args.save_ply and iteration in args.save_iterations:
-                gaussians.save_ply(os.path.join(case_dir, f'point_cloud_iter_{iteration:06d}.ply'))
+                save_model_ply(gaussians,os.path.join(case_dir, f'point_cloud_iter_{iteration:06d}.ply'),iteration)
             if iteration % args.checkpoint_interval == 0 or iteration == args.iters:
                 save_training_checkpoint(checkpoint_path, gaussians, iteration,
                                          history_iters, history_losses, args)
         if args.save_ply:
-            gaussians.save_ply(final_ply)
+            save_model_ply(gaussians,final_ply,max(start_iteration,args.iters))
         del gaussians, state
         torch.cuda.empty_cache()
 
