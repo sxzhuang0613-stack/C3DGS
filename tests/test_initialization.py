@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT),str(ROOT/'diff-gaussian-slice-rendering')]
+sys.path.insert(0, str(ROOT))
 if not all(importlib.util.find_spec(name) for name in ('torch','numpy','yaml','plyfile')):
     raise unittest.SkipTest('需要已有 PyTorch/NumPy/PyYAML/plyfile')
 import numpy as np

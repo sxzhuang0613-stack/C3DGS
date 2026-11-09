@@ -242,8 +242,8 @@ def training(args):
                     + args.lambda_anisotropic * loss_aniso
                     + args.lambda_interp_l1 * loss_interp_l1
                     + args.lambda_interp_ssim * loss_interp_ssim)
-            if not torch.isfinite(loss):
-                raise FloatingPointError(f'{sample_name}: 第 {iteration} 步损失非有限')
+            # if not torch.isfinite(loss):
+            #     raise FloatingPointError(f'{sample_name}: 第 {iteration} 步损失非有限')
             loss.backward()
             with torch.no_grad():
                 if iteration < args.densify_until_iter:

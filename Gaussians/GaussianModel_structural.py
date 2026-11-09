@@ -14,7 +14,7 @@ from .GaussianModel_noop import GaussianModel as BaseGaussianModel
 from .utils import matrix_to_quaternion
 from CostFunctions import create_window, _ssim_map
 from Renderer import render
-from diff_gaussian_slice_rendering import GaussianRasterizationSettings
+from diff_gaussian_slice_rendering import GaussianRasterizationSettings, normalize_rotations
 from diff_gaussian_slice_rendering.local_response import activated_covariance, response_patches
 
 
@@ -35,6 +35,11 @@ class Proposal:
 
 class GaussianModel(BaseGaussianModel):
     """只替换结构操作，PLY、属性访问和学习率沿用旧模型。"""
+
+    @property
+    def get_rotation(self):
+        # 与 Renderer 共用完整梯度链，绕开大点数 F.normalize 的二维行归约反向。
+        return normalize_rotations(self._rotation)
 
     def training_setup(self, args):
         super().training_setup(args)
@@ -99,7 +104,7 @@ class GaussianModel(BaseGaussianModel):
             invalid |= ~torch.isfinite(value).flatten(1).all(-1)
         scales = self.get_scaling
         invalid |= ~torch.isfinite(scales).all(-1) | (scales <= 0).any(-1)
-        components = self._rotation.double().unbind(-1)
+        components = tuple(component.double() for component in self._rotation.unbind(-1))
         invalid |= torch.sqrt(sum(value.square() for value in components)) < 1e-12
         return invalid
 

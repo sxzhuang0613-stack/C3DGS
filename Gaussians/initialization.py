@@ -73,7 +73,7 @@ class IntensityOperator:
         self.model, self.images = model, images
         self.rendering = dict(rendering,raster_options=dict(rendering['raster_options'],background=0.))
         self.parameters = dict(xyz=model.get_xyz.detach(),scales=model.get_scaling.detach(),
-                               rotations=model.get_rotation.detach())
+                               rotations=model._rotation.detach())
 
     def view(self, coefficients, index):
         return render(self.model,list(self.images.shape[-2:]),index,2,len(self.images),

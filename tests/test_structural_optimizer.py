@@ -1,8 +1,6 @@
 """小规模合成结构回归；不读取实际病例、不运行完整训练或性能基准。"""
-import importlib
 import importlib.util
 import json
-import os
 from pathlib import Path
 import random
 import sys
@@ -11,7 +9,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT),str(ROOT/'diff-gaussian-slice-rendering')]
+sys.path.insert(0, str(ROOT))
 if not all(importlib.util.find_spec(name) for name in ('torch','numpy','yaml','plyfile')):
     raise unittest.SkipTest('需要已有 PyTorch、NumPy、PyYAML 和 plyfile')
 import numpy as np
@@ -24,9 +22,6 @@ from diff_gaussian_slice_rendering.local_response import activated_covariance,re
 from diff_gaussian_slice_rendering.reference import rasterize_reference
 import diff_gaussian_slice_rendering as package
 
-if os.environ.get('C3DGS_EXTENSION_DIR'):
-    package.__path__.append(str(Path(os.environ['C3DGS_EXTENSION_DIR'])/'diff_gaussian_slice_rendering'))
-    package._C = importlib.import_module('diff_gaussian_slice_rendering._C_G3D')
 
 
 def reference_render(model,img_size,slice_idx,axis,num_slices,**kwargs):
@@ -344,7 +339,7 @@ class StructuralCudaTests(unittest.TestCase):
             for i,patch in enumerate(patches):
                 local[patch.indices] += patch.values*model.get_intensity[i,0]
             actual = package.rasterize_gaussians(model.get_xyz,model.get_intensity,cfg,
-                         scales=model.get_scaling,rotations=model.get_rotation)[0]
+                         scales=model.get_scaling,rotations=model._rotation)[0]
             torch.testing.assert_close(local.reshape_as(actual),actual.double(),atol=2e-7,rtol=2e-6)
 
     def test_cuda_commit_then_forward_backward_and_adam(self):

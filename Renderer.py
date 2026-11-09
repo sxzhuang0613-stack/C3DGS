@@ -1,5 +1,7 @@
 
 import torch
+
+# 按当前 Python 环境的正常导入规则使用 pip 安装的渲染库。
 from diff_gaussian_slice_rendering import rasterize_gaussians, GaussianRasterizationSettings
 
 
@@ -38,7 +40,10 @@ def render(Gaussians, img_size, slice_idx, axis, num_slices,
     parameters = {}
     if covariance is None:
         parameters['scales'] = Gaussians.get_scaling if scales is None else scales
-        parameters['rotations'] = Gaussians.get_rotation if rotations is None else rotations
+        # 库入口负责唯一一次可微单位化，避免模型属性与库包装重复构建归一化图。
+        if rotations is None:
+            rotations = Gaussians._rotation if hasattr(Gaussians,'_rotation') else Gaussians.get_rotation
+        parameters['rotations'] = rotations
     else:
         parameters['cov3Ds_precomp'] = covariance_to_vector(covariance).contiguous()
 

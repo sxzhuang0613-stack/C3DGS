@@ -51,8 +51,14 @@ static Parameters parameters(const Tensor& m,const Tensor& c,const Tensor& scale
     } else {
         TORCH_CHECK(cov.numel()==0 && scales.dim()==2 && scales.size(0)==n && scales.size(1)==3 && rot.dim()==2 && rot.size(0)==n && rot.size(1)==4,"supply scales [N,3] and rotations [N,4], or covariance [N,6]");
         TORCH_CHECK((scales>0).all().item<bool>(),"scales must be positive activated standard deviations");
-        auto norms=(rot*rot).sum(1);
-        TORCH_CHECK((torch::abs(norms-1)<1e-4).all().item<bool>(),"native API expects normalized wxyz rotations");
+        // 与 Python 单位化一致，避免再次进入二维行归约；阈值仍为原来的 1e-4。
+        // 分量先转 double 再平方，检查不依赖 float32 平方和的舍入/溢出。
+        auto parts=rot.unbind(1);
+        auto norms=torch::zeros({n},rot.options().dtype(torch::kFloat64));
+        for(const auto& part:parts) norms+=part.to(torch::kFloat64).square();
+        TORCH_CHECK((torch::abs(norms-1)<1e-4).all().item<bool>(),
+                    "native API expects normalized wxyz rotations; max |norm^2-1|=",
+                    torch::abs(norms-1).max().item<double>());
     }
     TORCH_CHECK(t.dim()==2 && t.size(0)==4 && t.size(1)==4,"slice_to_world must have shape [4,4]");
     // 将仅 4×4 的矩阵读到主机检查仿射底行和面内独立性。

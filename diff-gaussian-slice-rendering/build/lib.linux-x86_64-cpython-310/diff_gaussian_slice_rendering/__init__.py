@@ -11,14 +11,8 @@ import torch
 from torch import nn
 from torch.autograd.function import once_differentiable
 
-# 扩展尚未编译时仍允许导入并构造切片几何；真正调用渲染才报错。
-# 这使 CPU 上准备 DICOM/轴向矩阵不必立即依赖可运行的 CUDA 扩展。
-try:
-    from . import _C_G3D as _C
-    _extension_error = None
-except ImportError as exc:
-    _C = None
-    _extension_error = str(exc)
+# 扩展由 pip 构建并安装到包内，不从工作区 build 目录或环境变量旁加载。
+from . import _C_G3D as _C
 
 
 # 避免把 bool（Python 中属于 int 子类）误当作图像尺寸或切片数。
@@ -249,10 +243,10 @@ class GaussianRasterizationSettings:
 
 # 必须重新编译本包，旧库即使模块名字相同也不兼容新参数和缓存布局。
 def _require_extension():
-    if _C is None:
-        raise RuntimeError("CUDA extension is unavailable; build this source package first. " + str(_extension_error))
     if getattr(_C, "API_VERSION", None) != 3:
         raise RuntimeError("Loaded an old _C_G3D binary. Remove the old build/binary and rebuild this package.")
+    if getattr(_C, 'ROTATION_CHECK_VERSION', 0) != 1:
+        raise RuntimeError('Loaded a binary without the quaternion backward fix; reinstall this package with pip.')
 
 
 # 自动微分边界的六个输入：means、intensities、scales、rotations、covariance、settings。
@@ -303,12 +297,12 @@ class _RasterizeGaussians(torch.autograd.Function):
 
 def normalize_rotations(rotations):
     """与 native wxyz 契约一致的可微单位化，供主渲染和局部响应共用。"""
-    # double 分量显式求和，避免平方溢出及部分 CUDA 版本的大批量行归约误差。
-    components = rotations.double().unbind(dim=1)
+    # 全程使用一维 double 分量；避免大批量二维 norm/广播的 CUDA 归约及反向路径。
+    components = tuple(component.double() for component in rotations.unbind(dim=1))
     norms = torch.sqrt(sum(component.square() for component in components))
     if not bool(torch.isfinite(norms).all()) or bool((norms < 1e-12).any()):
         raise ValueError("rotations must be finite nonzero quaternions")
-    return torch.stack([component / norms for component in components], dim=1).float().contiguous()
+    return torch.stack([(component/norms).float() for component in components], dim=1).contiguous()
 
 
 # 推荐的唯一函数式公开入口。负责互斥输入、shape、设备和 dtype 校验。

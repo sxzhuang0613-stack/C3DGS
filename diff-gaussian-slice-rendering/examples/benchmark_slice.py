@@ -1,15 +1,10 @@
 """合成场景短基准：不读取病例、不优化模型，输出计时与峰值显存 JSON。"""
 import argparse
-import importlib
 import json
-from pathlib import Path
 import statistics
-import sys
 import time
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--package-root', type=Path, default=Path(__file__).resolve().parents[1])
-parser.add_argument('--extension-dir', type=Path)
 parser.add_argument('--points', type=int, default=50000)
 parser.add_argument('--size', type=int, default=128)
 parser.add_argument('--mode', choices=['point', 'gaussian'], default='point')
@@ -19,13 +14,9 @@ parser.add_argument('--repeats', type=int, default=10)
 parser.add_argument('--parameterization', choices=['covariance','scales'], default='covariance')
 parser.add_argument('--seed', type=int, default=42)
 args = parser.parse_args()
-sys.path.insert(0, str(args.package_root))
 import torch
 import diff_gaussian_slice_rendering as package
 
-if args.extension_dir:
-    package.__path__.append(str(args.extension_dir / 'diff_gaussian_slice_rendering'))
-    package._C = importlib.import_module('diff_gaussian_slice_rendering._C_G3D')
 package._require_extension()
 version = package._C.API_VERSION
 torch.manual_seed(args.seed)

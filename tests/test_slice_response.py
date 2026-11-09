@@ -1,8 +1,6 @@
 """加性场、解析 PSF、二维 footprint 及 CUDA 完整反向的回归测试。"""
-import importlib
 import importlib.util
 import math
-import os
 from pathlib import Path
 import sys
 import types
@@ -13,17 +11,13 @@ if importlib.util.find_spec('torch') is None:
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'diff-gaussian-slice-rendering'))
+sys.path.insert(0, str(ROOT))
 import diff_gaussian_slice_rendering as package
 from diff_gaussian_slice_rendering import GaussianRasterizationSettings as Settings, rasterize_gaussians
 from diff_gaussian_slice_rendering.reference import (
     covariance_from_scales, footprint_2d, rasterize_reference, response_3d, unpack_covariance,
 )
 
-# 可在独立 build_ext 目录验证新二进制，无需安装或覆盖已安装版本。
-if os.environ.get('C3DGS_EXTENSION_DIR'):
-    package.__path__.append(str(Path(os.environ['C3DGS_EXTENSION_DIR']) / 'diff_gaussian_slice_rendering'))
-    package._C = importlib.import_module('diff_gaussian_slice_rendering._C_G3D')
 
 
 def scene(dtype=torch.float64, device='cpu'):

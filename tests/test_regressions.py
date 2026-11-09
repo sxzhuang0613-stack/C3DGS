@@ -210,7 +210,6 @@ class TensorTests(unittest.TestCase):
 
     def test_cuda_covariance_path_has_gradients(self):
         import torch
-        sys.path.insert(0, str(ROOT / 'diff-gaussian-slice-rendering'))
         from diff_gaussian_slice_rendering import GaussianRasterizationSettings, rasterize_gaussians, _C
         if not torch.cuda.is_available() or _C is None:
             self.skipTest('需要可用 CUDA 和已编译的当前渲染扩展')

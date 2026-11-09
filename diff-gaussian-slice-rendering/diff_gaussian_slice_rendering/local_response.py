@@ -3,7 +3,6 @@ from dataclasses import dataclass
 import math
 
 import torch
-import torch.nn.functional as F
 from . import normalize_rotations
 from .reference import footprint_2d
 
@@ -19,8 +18,8 @@ class ResponsePatch:
 
 
 def activated_covariance(log_scales, raw_rotations):
-    # 与 GaussianModel.get_rotation -> rasterize_gaussians 顺序及 float32 舍入一致。
-    q = normalize_rotations(F.normalize(raw_rotations, dim=-1)).double()
+    # Renderer 直接传原始四元数，局部响应复用库入口的一次单位化及舍入。
+    q = normalize_rotations(raw_rotations).double()
     w, x, y, z = q.unbind(-1)
     rotation = torch.stack((
         1-2*(y*y+z*z), 2*(x*y-w*z), 2*(x*z+w*y),

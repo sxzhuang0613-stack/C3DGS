@@ -113,10 +113,17 @@ settings = GaussianRasterizationSettings.from_dicom(
 
 ```bash
 cd diff-gaussian-slice-rendering
-python -m pip install --no-build-isolation .
+python -m pip install --force-reinstall --no-deps --no-build-isolation .
 ```
 
-native `API_VERSION=3`；Python 拒绝旧二进制。`CMakeLists.txt` 仅构建原生静态库。`BUILD_FIX_zh.md` 和 `CODE_GUIDE_zh.md` 为 v2 历史说明，当前模型以本文件为准。
+native `API_VERSION=3`，四元数校验修订标记 `ROTATION_CHECK_VERSION=1`；Python 拒绝缺少该标记的旧二进制。`CMakeLists.txt` 仅构建原生静态库。`BUILD_FIX_zh.md` 和 `CODE_GUIDE_zh.md` 为 v2 历史说明，当前模型以本文件为准。
+
+本目录是待安装源码，使用前需执行上述 pip 安装命令。主项目的 `Renderer.py` 按正常导入规则
+使用当前环境 site-packages 中的安装包，不强制指向工作区源码。
+包内只加载随安装提供的 CUDA 扩展，不从 `build/lib.*` 或 `C3DGS_EXTENSION_DIR` 旁加载。
+安装完成后需要重新启动已加载旧扩展的 Python 进程；本次源码整理不会自动安装或替换环境中的库。
+
+主渲染入口直接传原始 wxyz，由库包装执行一次可微单位化；局部结构响应使用同一函数。单位化按四个一维 double 分量计算，避免二维行归约与广播反向路径；原生前后向同样按分量检查范数平方，仍要求与 1 的差小于 `1e-4`，不修正或放行非法输入。
 
 从项目根目录运行：
 
@@ -124,6 +131,6 @@ native `API_VERSION=3`；Python 拒绝旧二进制。`CMakeLists.txt` 仅构建�
 python -m unittest discover -s tests -p test_slice_response.py -v
 ```
 
-独立 `build_ext --build-lib <dir>` 后，可设置 `C3DGS_EXTENSION_DIR=<dir>` 运行测试，无需安装。`reference.py` 提供小规模 float64 PyTorch 参考：完整三维响应、二维 footprint 和可选裁剪。测试覆盖高精度数值积分、解析等价性、负强度、物理仿射、两条协方差梯度、裁剪窗口和训练 wrapper。
+测试前需在当前环境安装本库。`reference.py` 提供小规模 float64 PyTorch 参考：完整三维响应、二维 footprint 和可选裁剪。测试覆盖高精度数值积分、解析等价性、负强度、物理仿射、两条协方差梯度、裁剪窗口和训练 wrapper。
 
 `examples/benchmark_slice.py` 进行短时间前向/反向及峰值显存测试，参数由 CLI 指定。不同模型的数值输出不应比较为相同；性能比较必须说明点数、分辨率、PSF 和支撑范围。
