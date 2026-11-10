@@ -1,5 +1,6 @@
 
 import torch
+import random
 
 # 按当前 Python 环境的正常导入规则使用 pip 安装的渲染库。
 from diff_gaussian_slice_rendering import rasterize_gaussians, GaussianRasterizationSettings
@@ -50,6 +51,10 @@ def render(Gaussians, img_size, slice_idx, axis, num_slices,
     rendered_image, radii, weight_sum = rasterize_gaussians(
         means3D=xyz, intensities=colors, raster_settings=settings, **parameters
     )
+
+    # rendered_image = torch.rand((1, h, w),requires_grad=True).cuda()
+    # radii = xyz[:,0] ** 2
+
 
     return {"render": rendered_image[0],
             "visibility_filter" : radii > 0,
