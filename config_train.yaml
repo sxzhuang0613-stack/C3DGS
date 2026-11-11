@@ -33,7 +33,7 @@ psf_std_vector: null
 kernel_cutoff: 0.001
 cutoff_transition: 2.0
 covariance_jitter: 1.0e-08
-raster_debug: true
+raster_debug: false
 
 # 训练/测试共用的 SSIM 定义，data_range 为归一化强度范围
 ssim_window_size: 5
