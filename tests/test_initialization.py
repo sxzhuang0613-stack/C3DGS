@@ -17,7 +17,7 @@ import torch
 from config_utils import load_config, ssim_options
 from case_geometry import make_geometry, check_geometry, attach_geometry, save_model_ply, read_model_geometry
 from CostFunctions import anisotropic_scale_loss
-from Gaussians.GaussianModel_structural import GaussianModel, GaussianStructuralOptimizer, Primitive, Proposal
+from Gaussians.GaussianModel_structural import GaussianModel
 from Gaussians.initialization import IntensityOperator
 from diff_gaussian_slice_rendering import GaussianRasterizationSettings as Settings
 import diff_gaussian_slice_rendering as package
@@ -154,22 +154,11 @@ class InitializationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'不匹配'):read_model_geometry(path)
             self.assertIsNone(read_model_geometry(Path(directory)/'legacy.ply'))
 
-    def test_zero_contribution_birth_cannot_dilute_geometry_penalty(self):
-        from test_structural_optimizer import StructuralTests
-        fixture = StructuralTests();fixture.setUp()
-        try:
-            fixture.args.lambda_anisotropic=.1
-            model = fixture.model()
-            with torch.no_grad():model._scaling[0]=torch.tensor([.3,.3,3.6]).log()
-            engine = fixture.engine(model)
-            parent = engine.primitive(1)
-            index = engine.register(Primitive(torch.tensor([.7,.7,0.]),parent.scaling,parent.rotation,torch.zeros(1)))
-            with torch.no_grad():
-                self.assertFalse(engine.evaluate(Proposal('birth',(),(index,))))
-            before = anisotropic_scale_loss(model.get_scaling,reference_count=2)
-            after = anisotropic_scale_loss(torch.cat((model.get_scaling,torch.ones(1,3))),reference_count=2)
-            torch.testing.assert_close(before,after)
-        finally:fixture.doCleanups()
+    def test_fixed_reference_count_keeps_geometry_penalty(self):
+        scales = torch.tensor([[.3, .3, 3.6], [.3, .3, .3]])
+        before = anisotropic_scale_loss(scales, reference_count=2)
+        after = anisotropic_scale_loss(torch.cat((scales, torch.ones(1, 3))), reference_count=2)
+        torch.testing.assert_close(before, after)
 
 
 @unittest.skipUnless(torch.cuda.is_available() and package._C is not None,'需要 CUDA 与已有渲染扩展')
@@ -217,7 +206,7 @@ class CudaInitializationTests(unittest.TestCase):
             args.output_path=str(root/'training');args.iters=2;args.init_fit_steps=3
             args.checkpoint_interval=2;args.save_iterations=[1];args.reconstruct_interval=0
             args.densify_from_iter=1;args.densify_until_iter=3;args.densification_interval=1
-            args.structural_candidates=2;args.structural_max_accept=1;args.structural_neighbors=1
+            args.structural_min_observations=1;args.structural_grad_multiplier=0.
             with mock.patch('GetInitialGaussian.update_loss_plot'):
                 training(args)
                 args.iters=3
@@ -233,6 +222,7 @@ class CudaInitializationTests(unittest.TestCase):
             self.assertEqual(state['iteration'],3)
             check_geometry(state['geometry'],record['geometry'])
             test=load_config(ROOT/'config_test.yaml')
+            test.raster_debug=args.raster_debug  # 测试保持保存与评估的渲染几何一致。
             test.dataset_paths['acdc']=str(data_root);test.dataset_mode='all'
             test.output_path=str(root/'evaluation');test.save_arrays=True;test.save_images=False
             test.stage1_ply_path=str(root/'training'/'{case}'/'point_cloud_final.ply')

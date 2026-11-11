@@ -1,5 +1,6 @@
 """训练与测试共用的配置、设备及数据参数。"""
 import argparse
+import math
 import os
 from pathlib import Path
 
@@ -56,24 +57,24 @@ def load_config(path):
             raise ValueError('结构容量需要 1 <= min_points <= num_pts <= max_num_pts')
         if not 0 < values['structural_split_fraction'] < 1:
             raise ValueError('structural_split_fraction 必须在 (0,1) 内')
-        if not values['structural_interp_nodes'] or any(not 0 < n < 1 for n in values['structural_interp_nodes']):
-            raise ValueError('结构插层积分节点需要非空且位于 (0,1)')
-        for key in ('structural_candidates','structural_max_accept','structural_peak_window',
-                    'structural_refit_steps','structural_patch_budget','structural_cache_mb'):
-            if values[key] <= 0:
-                raise ValueError(f'{key} 必须大于零')
-        if values['structural_neighbors'] < 0 or values['structural_count_weight'] < 0 or values['structural_amplitude_weight'] < 0:
-            raise ValueError('结构邻居数及正则权重不能为负')
+        if values['structural_algorithm'] != 'batch_v1':
+            raise ValueError('当前 Stage1 仅支持 structural_algorithm=batch_v1')
+        for key in ('structural_grad_threshold', 'structural_grad_multiplier',
+                    'structural_clone_jitter', 'structural_prune_peak'):
+            if not isinstance(values[key], (int, float)) or not math.isfinite(values[key]) or values[key] < 0:
+                raise ValueError(f'{key} 必须为有限非负数')
+        if not (isinstance(values['structural_min_observations'], int)
+                and values['structural_min_observations'] > 0):
+            raise ValueError('structural_min_observations 必须为正整数')
+        if not math.isfinite(values['structural_split_sigma_pixels']) or values['structural_split_sigma_pixels'] <= 0:
+            raise ValueError('structural_split_sigma_pixels 必须为有限正数')
+        if not 0 <= values['structural_growth_fraction'] <= 1:
+            raise ValueError('structural_growth_fraction 必须位于 [0,1]')
         if (values['lambda_l1'] < 0 or values['lambda_ssim'] < 0
                 or values['lambda_l1']+values['lambda_ssim'] <= 0):
-            raise ValueError('结构评价需要非负且不全为零的 L1/SSIM 权重')
+            raise ValueError('训练需要非负且不全为零的 L1/SSIM 权重')
         if values['ssim_window_size'] <= 0 or values['ssim_window_size'] % 2 != 1:
-            raise ValueError('局部 SSIM 结构评价需要正奇数窗口')
-        if not 0 <= values['structural_merge_correlation'] <= 1:
-            raise ValueError('响应相关性阈值必须位于 [0,1]')
-        for key in ('structural_rank_rtol','structural_min_gain','structural_verify_atol','structural_verify_rtol'):
-            if values[key] < 0:
-                raise ValueError(f'{key} 不能为负')
+            raise ValueError('SSIM 需要正奇数窗口')
         if not (0 <= values['interpolation_probability'] <= 1
                 and 0 <= values['interpolation_alpha_min'] <= values['interpolation_alpha_max'] <= 1):
             raise ValueError('插层概率或 alpha 范围非法')

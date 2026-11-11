@@ -122,26 +122,22 @@ densify_from_iter: 1000
 densify_until_iter: 12500
 densification_interval: 200
 
-# 统一结构验收；不加入正常 Adam 的训练损失
-structural_count_weight: 1.0e-06
-structural_amplitude_weight: 1.0e-05
+# 批量结构调整：阈值掩码 + Clone/Split/Prune，不进行局部拟合和目标验收
+structural_algorithm: "batch_v1"
 structural_min_points: 1
-structural_candidates: 500000
-structural_max_accept: 500000
-structural_neighbors: 4
-structural_peak_window: 5
+# g_voxel 为按 XYZ 体素长度换算的平均位置梯度；实际门限取两者最大值
+structural_grad_threshold: 0.0
+structural_grad_multiplier: 2.0
+structural_min_observations: 8
+# 面内投影最大标准差，单位为输出像素；大点 Split，小点 Clone
+structural_split_sigma_pixels: 2.0
 structural_split_fraction: 0.35
-structural_merge_correlation: 0.98
-structural_refit_steps: 16
-structural_rank_rtol: 1.0e-06
-# 所有被调整邻居的完整支撑并集超过预算时放弃候选，不截短响应
-structural_patch_budget: 65536
-structural_cache_mb: 64
-structural_min_gain: 1.0e-07
-structural_verify_atol: 2.0e-05
-structural_verify_rtol: 2.0e-05
-# 仅在结构窗口与插层阶段重叠时启用固定求积节点，不消耗训练随机数
-structural_interp_nodes: [0.25, 0.5, 0.75]
+# 对称扰动以父点的局部标准差为单位；0 表示严格相同位置
+structural_clone_jitter: 0.05
+# 每周期净增点数不超过存活点数的 5%，并受 max_num_pts 限制
+structural_growth_fraction: 0.05
+# 已充分观测且 |intensity| 低于此值才裁剪；默认关闭，需根据误差容限标定
+structural_prune_peak: 0.0
 
 # Stage2 网络与控制点参数（不改变 motion 算法）
 evolution_hidden_dim: 128

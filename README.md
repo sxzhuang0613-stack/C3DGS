@@ -13,9 +13,8 @@ cd diff-gaussian-slice-rendering
 python -m pip install --no-build-isolation .
 ```
 
-需要当前源码的 API_VERSION=3 二进制；详细安装说明见该目录 README。
-本次结构优化还需要渲染库新增的 Python 文件 `local_response.py`，因此已有 API_VERSION=3
-安装也需要同步 Python 包源码；CUDA 算子本次没有改动。本次开发未安装或覆盖环境中的包。
+渲染扩展的版本与 Python 包装必须匹配，安装细节以该目录 README 为准。
+Stage1 批量结构操作不再依赖渲染库的 `local_response.py`，也不需要额外编译 CUDA。
 
 ## 配置和运行
 
@@ -87,23 +86,30 @@ Stage1 每例保存：
 
 Stage1 默认真实切片无放回均匀采样，支持单层/双层病例。原损失权重不变，插层起点保持原实际行为的 12500 步。`max_num_pts` 默认 200000，是结构容量上限；不将低强度组织当成低贡献点剪除。
 
-Stage1 使用独立的 `Gaussians/GaussianModel_structural.py`，继承旧模型的属性、PLY、Adam 和学习率接口，原 `GaussianModel_noop.py` 保留。
-结构周期沿用 `densify_from_iter / densify_until_iter / densification_interval`，只替换原增殖调用；正常训练采样、损失、反向传播和 Adam 更新次序不变。
-统一结构目标为全病例真实切片 L1/SSIM、原各向异性惩罚，加 `structural_count_weight*N` 和按观测响应范数归一化的强度 L1 惩罚；新增两项只用于结构验收。
-正常训练和结构验收的几何惩罚均为各点惩罚之和除以固定参考容量 N0；N0 保存并恢复，不随增删变化，防止零贡献 Birth 稀释平均正则。
+Stage1 使用独立的 `Gaussians/GaussianModel_structural.py`，不继承或导入 `GaussianModel_noop.py`；
+属性、PLY、Adam、学习率和初始化入口由本模型维护。旧 noop 文件及 Stage2/评估模型保持原样，PLY 格式兼容。
+结构周期沿用 `densify_from_iter / densify_until_iter / densification_interval`。
+正常训练采样、损失、反向传播和 Adam 更新次序不变；几何正则继续使用固定参考容量 N0。
 
-- Birth 从真实观测残差峰生成候选，在对应切片平面定位，继承邻域尺度和方向。
-- Split 沿残差结构方向提出对称子基元，保持初始有符号质量及二阶矩；Merge 对同号且响应高度相关的近邻做矩匹配，异号抵消交给联合 Prune。
-- Prune 评价删除及少量邻居重拟合的实际收益；Swap 联合删除和新增，在容量上限处重新分配基元。
+结构操作采用 `structural_algorithm: batch_v1`：
 
-五种操作共用局部响应、SVD/坐标下降强度重拟合及完整目标验收，不执行直接 Clone。
-局部响应匹配正式渲染的四元数激活、PSF、jitter、cutoff 和 transition；SSIM 使用原窗口的完整影响域、边界零填充和全图归一化。
-候选按已接受操作更新后的预测依次评价，最后统一提交参数、统计和 Adam 状态；正式 Renderer 再渲染一次校验，失败则恢复原参数与状态引用。
-未变基元保留动量，新基元动量清零，仅重拟合强度的旧基元重置强度动量。新增行沿用参数组的 Adam step。
+- 用按 XYZ 体素长度换算的平均位置梯度选点，门限为绝对下限与正梯度中位数倍数的较大值。
+- 以面内投影协方差的最大标准差（输出像素单位）区分 Clone/Split，避免仅因层间 spacing 大而反复法向分裂。
+- Clone 的父子强度各减半，位置施加对称小扰动；扰动为零时严格保持加性场。
+- Split 沿对面内投影贡献最大的内禀轴生成两个对称子点，仅缩小该轴；保持未加 jitter、未截断内禀核的有符号积分、中心和二阶矩，不保证逐像素预测不变。
+- Prune 始终清理无效点；可选弱幅值裁剪只作用于已充分观测的点，默认关闭。初版不额外裁掉未观测点或仅中心越界的点，以免误删仍有支撑的核。
+- 阈值点过多时随机限流，每周期最多净增 `floor(存活点数*structural_growth_fraction)` 点，并受 `max_num_pts` 限制。没有按梯度 Top-K 排序。
 
-`structural_*` 参数集中在训练配置中，控制候选数、局部邻居、响应缓存和支撑预算。超过预算会跳过整个候选，避免截断局部响应造成错误收益。
-默认结构窗口与插层阶段不重叠；若手动配置为重叠，固定 `structural_interp_nodes` 近似随机插层目标的期望，不改变训练随机数流。
-结构验收保证该观测集合上的目标下降；不保证后续随机训练损失单调，也不等于全局最优。有限支撑与原 Renderer 一致，仍是完整 Gaussian 的数值近似。
+每周期基于同一旧模型生成全部掩码和子点，各参数/Adam 状态统一提交一次。
+保留未改旧行动量，新行动量清零；Clone 父点的位置和强度动量清零，组级 Adam step 保留。
+提交后清空梯度/观测统计。`max_radii2D` 仅保留 checkpoint 字段，不再每步更新。
+没有逐候选 Python 循环、Birth/Merge/Swap、局部拟合、额外渲染、SSIM 验收或回滚。
+结构调整允许短期损失上升，不保证后续迭代能够补偿全部近似误差。
+
+旧搜索器的完整 checkpoint 不能解释为 batch_v1 精确续训；请使用新输出目录，必要时通过
+`warm_start_ply_path` 加载旧 PLY，并关闭新实验的 `stage1_resume/stage1_skip_existing`。
+新版 checkpoint 保持 Adam、随机状态和统计的完整恢复。阈值定义及校准方法见
+[批量高斯阈值说明](docs/batch_gaussian_thresholds.md)。
 
 Stage2 的网络、ODE 和控制点传播数学实现保持原样；仅适配数据、配置、PLY 和共享渲染接口。checkpoint 仍按传播方式和切片训练模式分别保存。
 新模型的 Stage2 渲染及稠密查询网格使用保存的病例 bounds；像素位移换算同步更新，旧模型保留旧导出约定。

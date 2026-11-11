@@ -112,6 +112,9 @@ def restore_training_checkpoint(state, gaussians, args):
     torch.cuda.set_rng_state_all([value.cpu() for value in state['cuda']])
 
 def check_resume_config(saved, args):
+    # 旧结构搜索器与批量统计的单位不同，不能把旧状态解释为精确续训。
+    if saved.get('structural_algorithm') != args.structural_algorithm:
+        raise ValueError('结构算法已改变，不能完整续训；请使用独立输出目录和 PLY 参数热启动')
     # 允许延长训练和改变输出频率；优化目标或 Adam 参数改变时应参数热启动。
     keys = ('position_lr_init','position_lr_final','position_lr_max_steps','position_lr_delay_mult',
             'intensity_lr','scaling_lr','rotation_lr','adam_eps','adam_betas',
@@ -247,10 +250,7 @@ def training(args):
             loss.backward()
             with torch.no_grad():
                 if iteration < args.densify_until_iter:
-                    radii = torch.stack([output['radii'] for output in outputs]).max(dim=0).values
                     visible = torch.stack([output['visibility_filter'] for output in outputs]).any(dim=0)
-                    gaussians.max_radii2D[visible] = torch.maximum(
-                        gaussians.max_radii2D[visible], radii[visible])
                     gaussians.add_densification_stats_3d(visible)
             gaussians.optimizer.step()
             gaussians.optimizer.zero_grad(set_to_none=True)
