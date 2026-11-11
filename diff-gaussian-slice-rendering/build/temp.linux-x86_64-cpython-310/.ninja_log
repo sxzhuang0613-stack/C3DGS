@@ -15,3 +15,8 @@
 2564	12193	1794362006988351846	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/rasterizer_impl.o	74bb878a8b668d5d
 2647	26858	1794362007071351788	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/ext.o	1f32191269819f23
 12193	80845	1794362016617345148	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/rasterize_points.o	7652fb6b5635e81d
+14	2976	1794362829138230850	/data1/zhuangshuxin/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/forward.o	6260ae6ca014673b
+14	3048	1794362829138230850	/data1/zhuangshuxin/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/backward.o	19a22193bf77ba7f
+15	9831	1794362829138230850	/data1/zhuangshuxin/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/rasterizer_impl.o	ea8cc6c31e7edd08
+15	26825	1794362829138230850	/data1/zhuangshuxin/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/ext.o	9fad733e3fcc69e7
+15	72322	1794362829142230807	/data1/zhuangshuxin/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/rasterize_points.o	63032b0c157e127

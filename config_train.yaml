@@ -4,11 +4,11 @@
 
 # 运行设备与随机性
 device: "cuda:0"
-random_seed: 42
+random_seed: 8439453
 
 # 数据来源、病例划分与参考相位
 dataset_name: "acdc"
-dataset_paths: {"acdc": "/home/exouser/Datasets/ACDC/database/dataset_npz", 
+dataset_paths: {"acdc": "/data1/zhuangshuxin/datasets/ACDC/ACDC_npz", 
                 "mnms": "/home/exouser/Datasets/MnMs/MnM/data_npz",
                 }
 dataset_mode: "all"
@@ -43,9 +43,9 @@ ssim_k2: 0.03
 data_range: 1.0
 
 # 输出与模型路径
-output_path: "./output/acdc_experiment"
-stage1_model_root: "./output/acdc_experiment"
-stage2_output_path: "./output/acdc_experiment/stage2_experiments"
+output_path: "/data1/zhuangshuxin/Outputs/C3DGS/acdc_experiment"
+stage1_model_root: "/data1/zhuangshuxin/Outputs/C3DGS/acdc_experiment"
+stage2_output_path: "/data1/zhuangshuxin/Outputs/C3DGS/acdc_experiment/stage2_experiments"
 
 # Stage1 训练、恢复与保存
 iters: 20000
