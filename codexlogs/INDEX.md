@@ -1,5 +1,7 @@
 # 开发记录
 
+- [2026-11-11：切片库改为归一化高斯平均](2026-11-11-normalized-slice-average.md)
+
 - [2026-11-11：Stage1 批量高斯操作与模型解耦](2026-11-11-batch-gaussian-operations.md)
 
 - [2026-11-10：渲染库 CUDA 缓存与索引安全检查](2026-11-10-renderer-cuda-safety.md)
