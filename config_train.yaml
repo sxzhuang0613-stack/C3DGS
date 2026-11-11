@@ -126,8 +126,8 @@ densification_interval: 200
 structural_count_weight: 1.0e-06
 structural_amplitude_weight: 1.0e-05
 structural_min_points: 1
-structural_candidates: 8
-structural_max_accept: 8
+structural_candidates: 500000
+structural_max_accept: 500000
 structural_neighbors: 4
 structural_peak_window: 5
 structural_split_fraction: 0.35

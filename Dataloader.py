@@ -219,61 +219,6 @@ class dataset(Dataset):
         }
         return {'cmr': cmr.contiguous(), 'label': label.contiguous(), 'info': info}
 
-    def get_flow_data(self,idx, dim):
-        # cases = self.cases[idx]
-        if dim == '2D':
-            Case = self.cases[idx]
-            # img, gt = self.load_data(Case, self.cmr_pth, self.cmrgt_pth)
-            flows = self.load_data(Case, self.flow_pth)
-            if self.augmentation:
-                flows = F.rotate(flows, angle=self.angle, interpolation=InterpolationMode.BILINEAR)
-
-            patient = Case.split('/')[0]
-            slices = Case.split('/')[1]
-            data = {
-                    'flows': flows,
-                    'info': [patient, slices],
-                    }
-            
-        elif dim == '3D':
-            Case = self.cases[idx]
-            patient = list(Case.keys())[0]
-            slcs = [os.path.join(patient, s) for s in Case[patient]]
-            flowsxy = self.load_data(slcs, self.flow_pth)
-            from tools import load_json
-            flow_norm = torch.tensor(load_json(self.config.flow_norm_path))
-            if flowsxy.shape[0] == flow_norm.shape[0]:
-                flowsxy = flowsxy / flow_norm[:, None, None, None, None]
-            S, T, C, H, W = flowsxy.shape
-            if self.flow_pth[0].split('/')[-1] == 'TMR_Flows':
-                flowsxy = flowsxy.repeat_interleave(2, dim=0)[:-1]
-                if T<14:
-                    div = 14 - T
-                    rep_im1 = flowsxy[:,-2:-1].repeat(1,div,1,1,1)
-                    flowsxy = torch.cat([flowsxy, rep_im1], dim=1)
-                elif T>14:
-                    flowsxy = flowsxy[:,:14]
-            elif self.flow_pth[0].split('/')[-1] == 'CMR_Flows':
-                # flowsxy = flowsxy.repeat_interleave(2, dim=0)[:-1]
-                if T<14:
-                    div = 14 - T
-                    rep_im1 = flowsxy[:,-2:-1].repeat(1,div,1,1,1)
-                    flowsxy = torch.cat([flowsxy, rep_im1], dim=1)
-                elif T>14:
-                    flowsxy = flowsxy[:,:14]
-
-            if self.augmentation:
-                flowsx = F.rotate(flowsxy[:,:,0], angle=self.angle, interpolation=InterpolationMode.BILINEAR)
-                flowsy = F.rotate(flowsxy[:,:,1], angle=self.angle, interpolation=InterpolationMode.BILINEAR)
-                flowsxy = torch.stack([flowsx, flowsy], dim=2)
-            data = {
-                    'flowsxy': flowsxy,
-                    'flows': torch.sqrt(flowsxy[:,:,0]**2 + flowsxy[:,:,1]**2),
-                    'info': [patient, Case[patient]],
-                    }
-            
-        return data
-
 def fix_len(arr):
     """把 array 的第 0 维统一到 target 长度。
     不足：复制最后一帧；超出：截断。
