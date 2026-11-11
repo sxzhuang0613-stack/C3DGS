@@ -13,8 +13,15 @@
 #include "rasterizer.h"
 #include <cstdint>
 namespace CudaRasterizer {
+inline constexpr uint64_t kCacheMagic = 0x4333444753434143ULL;
+inline constexpr uint64_t kCacheVersion = 1;
+// 三块缓存共享同次 forward 的标识；尺寸相同也不能混用不同调用的缓存。
+struct CacheHeader {
+    uint64_t magic, version, token, count, width, height, instances, kind;
+};
 // 每 Gaussian 缓存像素中心、二维精度 xx/xy/yy 与对数幅值；不保存三维像素运算。
 struct GeometryState {
+    CacheHeader* header;
     double2* means2D;
     double *precision, *log_amplitude;
     uint4* rectangles;
@@ -26,6 +33,8 @@ struct GeometryState {
 };
 // 按 Gaussian/tile 实例数分配，每个实例是一个 Gaussian 与一个 tile 的配对。
 struct BinningState {
+    CacheHeader* header;
+    uint32_t count;
     uint64_t *keys_unsorted, *keys;
     uint32_t *list_unsorted, *list;
     size_t sort_size;
@@ -34,6 +43,7 @@ struct BinningState {
 };
 // 仅保存 tile 候选范围；加性模型不需要图像分母或预测缓存。
 struct ImageState {
+    CacheHeader* header;
     uint2* ranges;
     static ImageState fromChunk(char*&, size_t);
 };

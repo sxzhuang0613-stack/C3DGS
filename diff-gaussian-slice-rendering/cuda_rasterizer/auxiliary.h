@@ -17,8 +17,26 @@
 #include <string>
 // 统一检查 CUDA runtime/CUB 返回状态。这里抛出的 C++ 异常由 PyBind 传回 Python。
 // 它不是 GPU 数值正确性的证明，debug 同步也不能替代数值梯度验证。
-inline void cudaCheck(cudaError_t e) {
-    if(e!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(e));
+inline void cudaCheck(cudaError_t e,const char* stage="CUDA") {
+    if(e!=cudaSuccess) throw std::runtime_error(std::string(stage)+": "+cudaGetErrorString(e));
+}
+// 常规模式仅检查启动状态；调试模式逐阶段同步，并在继续使用索引前报告错误。
+inline void checkStage(cudaStream_t stream,bool debug,const char* stage,int* invalid=nullptr) {
+    cudaCheck(cudaGetLastError(),stage);
+    if(!debug) return;
+    int error=0;
+    if(invalid) cudaCheck(cudaMemcpyAsync(&error,invalid,sizeof(error),cudaMemcpyDeviceToHost,stream),stage);
+    cudaCheck(cudaStreamSynchronize(stream),stage);
+    if(error) {
+        const char* reason="invalid geometry";
+        switch(error) {
+            case 2: reason="tile range exceeds instance count"; break;
+            case 3: reason="Gaussian ID exceeds point count"; break;
+            case 4: reason="duplicate offset or rectangle is invalid"; break;
+            case 5: reason="tile ID exceeds tile count"; break;
+        }
+        throw std::runtime_error(std::string(stage)+": "+reason);
+    }
 }
 // 四元数约定是 (w,x,y,z)，输出为 row-major 旋转矩阵。
 // 这组标量公式替代原 glm::mat3/glm::vec4 操作，避免依赖 GLM 的构造/存储约定。

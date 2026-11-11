@@ -30,7 +30,7 @@ static void tensorCheck(const Tensor& t,const Tensor& ref,const char* name) {
 // 组装并校验原生参数。forward 和 backward 共用该函数，确保两次解释一致。
 // 支持 N=0；使用 shape 而不是 numel 判定预计算分支，以区分 [0,6] 与空占位 [0]。
 static Parameters parameters(const Tensor& m,const Tensor& c,const Tensor& scales,const Tensor& rot,const Tensor& cov,const Tensor& t,const Tensor& psf,
-    int H,int W,double bg,double cutoff,double transition,double jitter) {
+    int H,int W,double bg,double cutoff,double transition,double jitter,bool debug) {
     tensorCheck(m,m,"means3D"); tensorCheck(c,m,"intensities"); tensorCheck(scales,m,"scales");
     tensorCheck(rot,m,"rotations"); tensorCheck(cov,m,"cov3Ds_precomp"); tensorCheck(t,m,"slice_to_world");
     tensorCheck(psf,m,"psf_vector");
@@ -39,6 +39,12 @@ static Parameters parameters(const Tensor& m,const Tensor& c,const Tensor& scale
     int n=(int)m.size(0);
     TORCH_CHECK(c.dim()==2 && c.size(0)==n && c.size(1)==1,"intensities must have shape [N,1]");
     TORCH_CHECK(H>0 && W>0 && H<=INT_MAX-16 && W<=INT_MAX-16 && int64_t(H)*W<=INT_MAX,"invalid image dimensions");
+    // 在分配图像及缓存前检查设备限制，避免合法整数尺寸产生非法 kernel 网格。
+    cudaDeviceProp device;
+    cudaCheck(cudaGetDeviceProperties(&device,m.get_device()),"parameters.grid_limits");
+    TORCH_CHECK((W+kTileWidth-1)/kTileWidth<=device.maxGridSize[0] &&
+                (H+kTileHeight-1)/kTileHeight<=device.maxGridSize[1],
+                "image dimensions exceed CUDA grid limits");
     TORCH_CHECK(std::isfinite(bg) && std::abs(bg)<=std::numeric_limits<float>::max() && std::isfinite(cutoff) && cutoff>0 && cutoff<1,"invalid background or kernel_cutoff");
     double qmax=-2*std::log(cutoff);
     TORCH_CHECK(std::isfinite(transition) && transition>=0 && transition<qmax,"cutoff_transition must be in [0,-2 log(kernel_cutoff))");
@@ -70,7 +76,7 @@ static Parameters parameters(const Tensor& m,const Tensor& c,const Tensor& scale
     double cross[3]={a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]};
     double nn=0; for(double v:cross) nn+=v*v;
     TORCH_CHECK(aa>0 && bb>0 && nn>1e-12*aa*bb,"slice pixel axes are degenerate or nearly collinear");
-    return {n,W,H,m.data_ptr<float>(),c.data_ptr<float>(),precomputed?nullptr:scales.data_ptr<float>(),precomputed?nullptr:rot.data_ptr<float>(),precomputed?cov.data_ptr<float>():nullptr,t.data_ptr<float>(),psf.data_ptr<float>(),bg,qmax,transition,jitter};
+    return {n,W,H,m.data_ptr<float>(),c.data_ptr<float>(),precomputed?nullptr:scales.data_ptr<float>(),precomputed?nullptr:rot.data_ptr<float>(),precomputed?cov.data_ptr<float>():nullptr,t.data_ptr<float>(),psf.data_ptr<float>(),bg,qmax,transition,jitter,debug};
 }
 // 把 resize_ 封装成 Rasterizer 所需的字节分配回调。
 // 对应 Tensor 存储由 PyTorch 管理，返回的数据指针只在本次调用及缓存存活期内使用。
@@ -83,7 +89,7 @@ static Allocator allocator(Tensor& t) {
 ForwardResult RasterizeGaussiansCUDA(const Tensor& m,const Tensor& c,const Tensor& scales,const Tensor& rot,const Tensor& cov,const Tensor& t,const Tensor& psf,
     int H,int W,double bg,double cutoff,double transition,double jitter,bool debug) {
     TORCH_CHECK(m.is_cuda(),"means3D must be CUDA"); c10::cuda::CUDAGuard guard(m.device());
-    auto p=parameters(m,c,scales,rot,cov,t,psf,H,W,bg,cutoff,transition,jitter);
+    auto p=parameters(m,c,scales,rot,cov,t,psf,H,W,bg,cutoff,transition,jitter,debug);
     auto out=torch::empty({1,H,W},m.options()),weights=torch::empty_like(out);
     auto radii=torch::zeros({p.count},m.options().dtype(torch::kInt32));
     auto options=m.options().dtype(torch::kUInt8);
@@ -92,7 +98,6 @@ ForwardResult RasterizeGaussiansCUDA(const Tensor& m,const Tensor& c,const Tenso
     // 沿用调用方当前 stream，防止非默认 stream 上的数据尚未准备好就被其他 stream 读取。
     // 设备 guard 与 stream 管理是执行正确性的一部分，不能因代码精简而省略。
     int n=Rasterizer::forward(allocator(geom),allocator(bin),allocator(im),p,out.data_ptr<float>(),weights.data_ptr<float>(),radii.data_ptr<int>(),stream);
-    if(debug) cudaCheck(cudaStreamSynchronize(stream));
     return {n,out,radii,geom,bin,im,weights};
 }
 // PyBind 调用的反向入口：检查 incoming 与缓存形状/设备，零初始化五类梯度。
@@ -101,10 +106,10 @@ BackwardResult RasterizeGaussiansBackwardCUDA(const Tensor& m,const Tensor& c,co
     int H,int W,double bg,double cutoff,double transition,double jitter,bool debug,
     const Tensor& incoming,int instances,const Tensor& geometry,const Tensor& binning,const Tensor& image) {
     TORCH_CHECK(m.is_cuda(),"means3D must be CUDA"); c10::cuda::CUDAGuard guard(m.device());
-    auto p=parameters(m,c,scales,rot,cov,t,psf,H,W,bg,cutoff,transition,jitter);
+    auto p=parameters(m,c,scales,rot,cov,t,psf,H,W,bg,cutoff,transition,jitter,debug);
     tensorCheck(incoming,m,"grad_image");
     TORCH_CHECK(incoming.dim()==3 && incoming.size(0)==1 && incoming.size(1)==H && incoming.size(2)==W,"grad_image shape mismatch");
-    TORCH_CHECK(instances>=0,"invalid instance count");
+    TORCH_CHECK(instances>=0 && instances<=INT_MAX-255,"invalid instance count");
     // 核对缓存类型与最小字节数，防止将旧版本的 cache 误解释为新布局。
     // 这不是对任意外部伪造 buffer 的完整内容验证；private native API 应只由本包装调用。
     const Tensor* buffers[3]={&geometry,&binning,&image};
@@ -118,6 +123,5 @@ BackwardResult RasterizeGaussiansBackwardCUDA(const Tensor& m,const Tensor& c,co
     Gradients g{dm.data_ptr<float>(),dc.data_ptr<float>(),dS.data_ptr<float>(),ds.data_ptr<float>(),dr.data_ptr<float>(),footprint.data_ptr<float>()};
     cudaStream_t stream=c10::cuda::getCurrentCUDAStream(m.get_device()).stream();
     Rasterizer::backward(p,instances,reinterpret_cast<char*>(geometry.data_ptr<uint8_t>()),reinterpret_cast<char*>(binning.data_ptr<uint8_t>()),reinterpret_cast<char*>(image.data_ptr<uint8_t>()),incoming.data_ptr<float>(),g,stream);
-    if(debug) cudaCheck(cudaStreamSynchronize(stream));
     return {dm,dc,ds,dr,dS};
 }

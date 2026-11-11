@@ -116,7 +116,11 @@ cd diff-gaussian-slice-rendering
 python -m pip install --force-reinstall --no-deps --no-build-isolation .
 ```
 
-native `API_VERSION=3`，四元数校验修订标记 `ROTATION_CHECK_VERSION=1`；Python 拒绝缺少该标记的旧二进制。`CMakeLists.txt` 仅构建原生静态库。`BUILD_FIX_zh.md` 和 `CODE_GUIDE_zh.md` 为 v2 历史说明，当前模型以本文件为准。
+native `API_VERSION=4`、`CACHE_VERSION=1`，四元数校验修订标记 `ROTATION_CHECK_VERSION=1`；Python 拒绝不兼容的旧二进制。`_C.SOURCE_HASH` 保存编译时的源码 SHA-256，便于核对二进制来源。缓存布局已更新，需重新构建安装并重启使用该包的 Python 进程。`CMakeLists.txt` 仅构建原生静态库。`BUILD_FIX_zh.md` 和 `CODE_GUIDE_zh.md` 为 v2 历史说明，当前模型以本文件为准。
+
+三块内部缓存保存布局版本、Gaussian 数、图像尺寸、实例数和同次 forward 标识；backward 在读取候选前核对，拒绝缓存混用。该检查会增加一次当前 stream 的同步，不保证识别任意伪造内容或整套替换的缓存。图像尺寸在分配输出前按当前设备的 CUDA grid 限制检查。
+
+设置 `debug=True` 时，preprocess、scan、分桶、排序、tile 范围生成及各前后向 kernel 分阶段同步，异常附带阶段名；候选范围、Gaussian ID、分桶偏移和 tile ID 在使用前检查，非法索引会抛错。默认模式不执行这些逐索引检查和额外的阶段同步，渲染公式及梯度保持原有定义。
 
 本目录是待安装源码，使用前需执行上述 pip 安装命令。主项目的 `Renderer.py` 按正常导入规则
 使用当前环境 site-packages 中的安装包，不强制指向工作区源码。

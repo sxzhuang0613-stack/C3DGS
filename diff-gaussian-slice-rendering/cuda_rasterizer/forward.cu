@@ -57,13 +57,16 @@ __global__ void preprocessCUDA(Parameters p,GeometryState g,int* radii,dim3 grid
 }
 
 // 背景仅加一次；weight_sum 是不含有符号强度的响应和，不是归一化分母。
+template<bool Debug>
 __global__ void renderCUDA(Parameters p,GeometryState g,BinningState bin,ImageState img,float* out,float* weights) {
     int x=blockIdx.x*kTileWidth+threadIdx.x,y=blockIdx.y*kTileHeight+threadIdx.y;
     if(x>=p.width||y>=p.height) return;
     uint2 range=img.ranges[blockIdx.y*gridDim.x+blockIdx.x];
+    if(Debug && (range.x>range.y || range.y>bin.count)) { atomicCAS(g.invalid,0,2); return; }
     double prediction=p.background,sum=0;
     for(uint32_t j=range.x;j<range.y;++j) {
         uint32_t i=bin.list[j];
+        if(Debug && i>=uint32_t(p.count)) { atomicCAS(g.invalid,0,3); return; }
         double dx=x-g.means2D[i].x,dy=y-g.means2D[i].y;
         const double* h=g.precision+3*i;
         double Q=h[0]*dx*dx+2*h[1]*dx*dy+h[2]*dy*dy-2*g.log_amplitude[i];
@@ -78,5 +81,6 @@ void FORWARD::preprocess(const Parameters& p,GeometryState g,int* radii,dim3 gri
     if(p.count) preprocessCUDA<<<(p.count+255)/256,256,0,s>>>(p,g,radii,grid);
 }
 void FORWARD::render(const Parameters& p,GeometryState g,BinningState b,ImageState im,float* out,float* w,dim3 grid,cudaStream_t s) {
-    renderCUDA<<<grid,dim3(kTileWidth,kTileHeight),0,s>>>(p,g,b,im,out,w);
+    if(p.debug) renderCUDA<true><<<grid,dim3(kTileWidth,kTileHeight),0,s>>>(p,g,b,im,out,w);
+    else renderCUDA<false><<<grid,dim3(kTileWidth,kTileHeight),0,s>>>(p,g,b,im,out,w);
 }

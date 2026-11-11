@@ -5,3 +5,13 @@
 2315	9822	1794261057809120914	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/rasterizer_impl.o	4e2a9e88f442fb4a
 2406	29728	1794261057898952186	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/ext.o	fdc6d674fe7a72f7
 9823	93331	1794261065317112595	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/rasterize_points.o	e9b47d16959e9219
+20	2167	1794359584224085292	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/forward.o	fcc1cb87ee953839
+19	2423	1794359584223085292	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/backward.o	e56dca79519c990a
+2167	11000	1794359586372463731	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/rasterizer_impl.o	b1f29a6888ba1d89
+2423	27176	1794359586627085065	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/ext.o	84e16a7a3105d71d
+11002	73122	1794359595206981254	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/rasterize_points.o	e42c19065849c1d6
+26	2564	1794362004450353613	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/forward.o	81e8799170c5d29e
+25	2647	1794362004449353613	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/backward.o	f9b74613739ddb57
+2564	12193	1794362006988351846	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/rasterizer_impl.o	74bb878a8b668d5d
+2647	26858	1794362007071351788	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/ext.o	1f32191269819f23
+12193	80845	1794362016617345148	/home/exouser/Codes/C3DGS/diff-gaussian-slice-rendering/build/temp.linux-x86_64-cpython-310/rasterize_points.o	7652fb6b5635e81d

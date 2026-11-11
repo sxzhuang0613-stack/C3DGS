@@ -11,11 +11,14 @@
 
 #include <torch/extension.h>
 #include "rasterize_points.h"
+#include "cuda_rasterizer/rasterizer_impl.h"
 // 将两个 C++ 函数绑定成 Python 可调用的扩展入口。
 // API_VERSION 用来拒绝旧版 .so/.pyd，避免新 Python 包装错误加载旧签名的二进制。
 // 这里不负责自动微分；自动微分协议由 Python 的 torch.autograd.Function 实现。
 PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {
-    m.attr("API_VERSION")=3;
+    m.attr("API_VERSION")=4;
+    m.attr("CACHE_VERSION")=CudaRasterizer::kCacheVersion;
+    m.attr("SOURCE_HASH")=RENDERER_SOURCE_HASH;
     // 签名未变；标记逐分量四元数校验，避免 Python 修复后误用旧二进制。
     m.attr("ROTATION_CHECK_VERSION")=1;
     m.def("rasterize_gaussians",&RasterizeGaussiansCUDA,"Additive analytic slice forward (CUDA)");

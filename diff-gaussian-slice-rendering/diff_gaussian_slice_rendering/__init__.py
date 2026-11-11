@@ -243,7 +243,7 @@ class GaussianRasterizationSettings:
 
 # 必须重新编译本包，旧库即使模块名字相同也不兼容新参数和缓存布局。
 def _require_extension():
-    if getattr(_C, "API_VERSION", None) != 3:
+    if getattr(_C, "API_VERSION", None) != 4 or getattr(_C, "CACHE_VERSION", None) != 1:
         raise RuntimeError("Loaded an old _C_G3D binary. Remove the old build/binary and rebuild this package.")
     if getattr(_C, 'ROTATION_CHECK_VERSION', 0) != 1:
         raise RuntimeError('Loaded a binary without the quaternion backward fix; reinstall this package with pip.')

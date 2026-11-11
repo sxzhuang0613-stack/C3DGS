@@ -1,4 +1,5 @@
 from pathlib import Path
+import hashlib
 from setuptools import setup
 from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 
@@ -6,6 +7,17 @@ from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 # 源码不再 include glm，因此没有 third_party/glm 的 include 路径。
 # 这不表示没有外部依赖：Torch、CUDA Runtime、CUB 和编译工具链仍然必需。
 root = Path(__file__).resolve().parent
+# 将源码指纹写入扩展，便于确认已安装二进制对应的代码；不依赖工作区 Git 状态。
+source_files = sorted(
+    [root / "setup.py", root / "ext.cpp", root / "rasterize_points.cu", root / "rasterize_points.h"]
+    + list((root / "cuda_rasterizer").glob("*.h"))
+    + list((root / "cuda_rasterizer").glob("*.cu"))
+    + list((root / "diff_gaussian_slice_rendering").glob("*.py"))
+)
+source_hash = hashlib.sha256()
+for source in source_files:
+    source_hash.update(source.relative_to(root).as_posix().encode() + b"\0")
+    source_hash.update(source.read_bytes() + b"\0")
 setup(
     name="diff-gaussian-slice-rendering",
     version="3.0.0",
@@ -19,6 +31,7 @@ setup(
         sources=["cuda_rasterizer/rasterizer_impl.cu", "cuda_rasterizer/forward.cu",
                  "cuda_rasterizer/backward.cu", "rasterize_points.cu", "ext.cpp"],
         include_dirs=[str(root)],
+        define_macros=[("RENDERER_SOURCE_HASH", f'"{source_hash.hexdigest()}"')],
         # Architecture is selected by PyTorch/TORCH_CUDA_ARCH_LIST, not hardcoded.
         # No --use_fast_math: the same weight/cutoff must be used in both passes.
         extra_compile_args={"cxx": ["-O3"] if __import__("os").name != "nt" else ["/O2"],

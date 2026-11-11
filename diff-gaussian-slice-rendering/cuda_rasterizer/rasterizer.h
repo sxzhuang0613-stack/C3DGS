@@ -23,6 +23,7 @@ struct Parameters {
     int count, width, height;
     const float *means, *intensities, *scales, *rotations, *covariance, *slice_to_world, *psf_vector;
     double background, qmax, transition, jitter;
+    bool debug;
 };
 // 梯度数组由 C++ bridge 零初始化，CUDA 累加后按约定顺序返回 Python。
 // 协方差路径不使用 scales/rotations 梯度；两者在 Python 被转换为 None。

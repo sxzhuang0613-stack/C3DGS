@@ -14,13 +14,16 @@
 using namespace CudaRasterizer;
 
 // 每像素仅反传二维中心、对称精度与 log 幅值；含平滑支撑窗的完整导数。
+template<bool Debug>
 __global__ void backwardCUDA(Parameters p,GeometryState geom,BinningState bin,ImageState img,const float* incoming,Gradients g) {
     int x=blockIdx.x*kTileWidth+threadIdx.x,y=blockIdx.y*kTileHeight+threadIdx.y;
     if(x>=p.width||y>=p.height) return;
     double upstream=incoming[y*p.width+x];
     uint2 range=img.ranges[blockIdx.y*gridDim.x+blockIdx.x];
+    if(Debug && (range.x>range.y || range.y>bin.count)) { atomicCAS(geom.invalid,0,2); return; }
     for(uint32_t j=range.x;j<range.y;++j) {
         uint32_t i=bin.list[j];
+        if(Debug && i>=uint32_t(p.count)) { atomicCAS(geom.invalid,0,3); return; }
         double dx=x-geom.means2D[i].x,dy=y-geom.means2D[i].y;
         const double* h=geom.precision+3*i;
         double Q=h[0]*dx*dx+2*h[1]*dx*dy+h[2]*dy*dy-2*geom.log_amplitude[i];
@@ -117,10 +120,15 @@ __global__ void covarianceBackward(Parameters p,Gradients g) {
 }
 
 void BACKWARD::render(const Parameters& p,GeometryState g,BinningState b,ImageState im,const float* incoming,Gradients grads,dim3 grid,cudaStream_t s) {
-    backwardCUDA<<<grid,dim3(kTileWidth,kTileHeight),0,s>>>(p,g,b,im,incoming,grads);
+    if(p.debug) backwardCUDA<true><<<grid,dim3(kTileWidth,kTileHeight),0,s>>>(p,g,b,im,incoming,grads);
+    else backwardCUDA<false><<<grid,dim3(kTileWidth,kTileHeight),0,s>>>(p,g,b,im,incoming,grads);
 }
 void BACKWARD::preprocess(const Parameters& p,GeometryState geom,Gradients g,cudaStream_t s) {
     if(!p.count) return;
     footprintBackward<<<(p.count+255)/256,256,0,s>>>(p,geom,g);
-    if(!p.covariance) covarianceBackward<<<(p.count+255)/256,256,0,s>>>(p,g);
+    checkStage(s,p.debug,"backward.footprintBackward");
+    if(!p.covariance) {
+        covarianceBackward<<<(p.count+255)/256,256,0,s>>>(p,g);
+        checkStage(s,p.debug,"backward.covarianceBackward");
+    }
 }

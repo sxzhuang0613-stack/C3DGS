@@ -1,5 +1,6 @@
 # 开发记录
 
+- [2026-11-10：渲染库 CUDA 缓存与索引安全检查](2026-11-10-renderer-cuda-safety.md)
 - [2026-11-09：渲染库恢复为待安装源码](2026-11-09-renderer-source-package.md)
 - [2026-11-09：恢复使用 pip 安装的渲染库](2026-11-09-installed-renderer-import.md)
 - [补齐 Dataloader 的 128×128 输出逻辑](dataloader-128-restored.md)
