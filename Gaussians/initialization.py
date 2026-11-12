@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from Renderer import render
+from .utils import covariance_from_scaling_rotation
 
 
 def _sample_positions(images, spacing, bounds, count, args, generator, guided=True):
@@ -68,12 +69,16 @@ def _sample_positions(images, spacing, bounds, count, args, generator, guided=Tr
 
 
 class IntensityOperator:
-    """正式 Renderer 的线性强度算子及伴随；不构造像素数乘高斯数的矩阵。"""
+    """固定几何的归一化颜色线性算子及伴随；不构造稠密响应矩阵。"""
     def __init__(self, model, images, rendering):
         self.model, self.images = model, images
         self.rendering = dict(rendering,raster_options=dict(rendering['raster_options'],background=0.))
-        self.parameters = dict(xyz=model.get_xyz.detach(),scales=model.get_scaling.detach(),
-                               rotations=model._rotation.detach())
+        # CG 期间几何固定，协方差只构造一次；xyz 仍共享数据以支持未观测点重采样。
+        self.parameters = dict(
+            xyz=model.get_xyz.detach(),
+            covariance=covariance_from_scaling_rotation(
+                model.get_scaling.detach(), model._rotation.detach()),
+        )
 
     def view(self, coefficients, index):
         return render(self.model,list(self.images.shape[-2:]),index,2,len(self.images),
@@ -85,7 +90,9 @@ class IntensityOperator:
         outputs = [self.view(coefficients,i) for i in range(len(self.images))]
         prediction = torch.stack([output['render'] for output in outputs]).double()
         if visibility:
-            return prediction,torch.stack([o['visibility_filter'] for o in outputs]).any(0)
+            # radii 仅代表候选范围；单位伴随的正值才说明高斯实际参与像素归一化。
+            visible = self.adjoint(torch.ones_like(prediction)) > 0
+            return prediction, visible
         return prediction
 
     def adjoint(self, values):
@@ -115,13 +122,10 @@ def initialize_from_images(model, images, geometry, args, rendering, case_name):
     scales[:,:2] = spacing[:2]*args.init_fine_sigma_pixels
     coarse = torch.randperm(count,device=images.device,generator=generator)[:round(count*args.init_coarse_fraction)]
     scales[coarse,:2] = spacing[:2]*args.init_coarse_sigma_pixels
-    # PSF 是固定观测向量；允许其本身宽于覆盖目标，不反向缩小 PSF。
+    # 新库没有 PSF 卷积，法向尺度直接按物理层间距设置。
     options = rendering['raster_options']
-    vector = options['psf_std_vector']
-    normal_psf = options['psf_sigma'] if vector is None else abs(vector[2])
     floor = args.init_normal_floor_pixels*spacing[:2].min()
-    scales[:,2] = torch.sqrt(((args.init_normal_sigma_spacing*spacing[2])**2
-                              -normal_psf**2-options['covariance_jitter']).clamp_min(floor**2))
+    scales[:,2] = torch.maximum(args.init_normal_sigma_spacing*spacing[2], floor)
     scales = torch.maximum(scales,scales.max(1).values[:,None]/args.init_max_axis_ratio)
     logs = scales.log()
     if not bool(((logs >= args.log_scale_min)&(logs <= args.log_scale_max)).all()):
@@ -139,9 +143,12 @@ def initialize_from_images(model, images, geometry, args, rendering, case_name):
         if bool(visible.all()):
             break
         if attempt == args.init_support_retries:
-            raise ValueError('初始化仍存在无观测支持的高斯，请检查 PSF、cutoff 和初始尺度')
+            raise ValueError('初始化仍存在无像素贡献的高斯，请检查点数、采样和初始尺度')
         model._xyz[~visible] = _sample_positions(images,spacing,bounds,int((~visible).sum()),args,generator,guided=False)
-    target = images.double()-options['background']
+    # 背景只出现在无覆盖处；不能像加性场一样从所有像素减去背景。
+    covered = field > 0
+    background_image = (~covered)*options['background']
+    target = images.double()-background_image
     field_norm = field.square().mean()
     if not bool(torch.isfinite(field_norm) & (field_norm > 0)):
         raise FloatingPointError('初始化的单位系数响应为零或非有限')

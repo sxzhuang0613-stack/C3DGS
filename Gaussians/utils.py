@@ -20,6 +20,34 @@ from plyfile import PlyData, PlyElement
 import math
 from PIL import Image
 
+def normalize_rotations(rotations):
+    """可微单位化 wxyz；显式 double 分量避免大批量行归约的精度问题。"""
+    components = tuple(component.double() for component in rotations.unbind(-1))
+    norms = torch.sqrt(sum(component.square() for component in components))
+    if not bool(torch.isfinite(norms).all()) or bool((norms < 1e-12).any()):
+        raise ValueError('四元数必须有限且非零')
+    return torch.stack([component/norms for component in components], -1).to(rotations.dtype)
+
+
+def quaternion_rotation_matrix(rotations):
+    """由原始 wxyz 构造旋转矩阵，保持单位化的梯度链。"""
+    w, x, y, z = normalize_rotations(rotations).unbind(-1)
+    return torch.stack((
+        1-2*(y*y+z*z), 2*(x*y-w*z), 2*(x*z+w*y),
+        2*(x*y+w*z), 1-2*(x*x+z*z), 2*(y*z-w*x),
+        2*(x*z-w*y), 2*(y*z+w*x), 1-2*(x*x+y*y),
+    ), -1).reshape(-1, 3, 3)
+
+
+def covariance_from_scaling_rotation(scales, rotations):
+    """从激活尺度及 wxyz 得到 [N,6] 模型空间协方差。"""
+    matrix = quaternion_rotation_matrix(rotations) * scales[:, None, :]
+    # 一次批量乘法构造协方差，避免六组分量运算的重复 CUDA 启动。
+    covariance = matrix @ matrix.transpose(1, 2)
+    return torch.stack((covariance[:, 0, 0], covariance[:, 0, 1], covariance[:, 0, 2],
+                        covariance[:, 1, 1], covariance[:, 1, 2], covariance[:, 2, 2]), -1)
+
+
 def inverse_sigmoid(x):
     # 限制 x 的范围，防止 log(0) 或除以 0
     x = torch.clamp(x, 1e-6, 1.0 - 1e-6)

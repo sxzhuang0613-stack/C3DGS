@@ -31,7 +31,7 @@ class ConfigTests(unittest.TestCase):
     def test_configs_have_numeric_optimizer_and_renderer_values(self):
         from config_utils import load_config
         args = load_config(ROOT / 'config_train.yaml')
-        for key in ('adam_eps', 'stage2_adam_eps', 'covariance_jitter', 'init_ridge_relative'):
+        for key in ('adam_eps', 'stage2_adam_eps', 'init_ridge_relative'):
             self.assertIsInstance(getattr(args, key), float)
         self.assertEqual(args.interpolate_iter, 12500)
         self.assertGreaterEqual(args.max_num_pts, args.num_pts)
@@ -60,7 +60,7 @@ class ConfigTests(unittest.TestCase):
         from config_utils import load_config
         for config, files in (
             ('config_train.yaml', ['GetInitialGaussian.py', 'Motion.py', 'temp.py',
-                                   'Gaussians/GaussianModel_noop.py', 'config_utils.py',
+                                   'config_utils.py',
                                    'Gaussians/initialization.py', 'Gaussians/GaussianModel_structural.py',
                                    'case_geometry.py']),
             ('config_test.yaml', ['evaluate.py', 'config_utils.py', 'case_geometry.py']),
@@ -74,48 +74,14 @@ class ConfigTests(unittest.TestCase):
             self.assertFalse(used - set(vars(args)))
 
 
-class RendererTests(unittest.TestCase):
-    def setUp(self):
-        self.calls = []
-        class Value:
-            device, dtype = 'cuda:0', 'float32'
-            def contiguous(self): return self
-            def __gt__(self, value): return True
-        self.value = Value()
-        def rasterize(**kwargs):
-            self.calls.append(kwargs)
-            return [self.value], self.value, self.value
-        settings = types.SimpleNamespace(from_axis=lambda **kwargs: kwargs)
-        namespace = {'GaussianRasterizationSettings': settings,
-                     'covariance_to_vector': lambda value: value,
-                     'rasterize_gaussians': rasterize}
-        self.render = source_function('Renderer.py', 'render', namespace)
-        self.model = types.SimpleNamespace(
-            get_xyz=self.value, get_color=self.value, get_scaling=self.value,
-            get_rotation=self.value, bounds=[2., 3., 4.])
+from test_stage1_normalized import RendererTests as Stage1RendererTests
 
-    def test_precomputed_covariance_is_forwarded_exclusively(self):
-        self.render(self.model, [16, 20], 0.25, 1, 3, covariance=self.value)
-        call = self.calls[-1]
-        self.assertIs(call['cov3Ds_precomp'], self.value)
-        self.assertNotIn('scales', call)
-        self.assertNotIn('rotations', call)
 
-    def test_axis_bounds_and_settings_are_preserved(self):
-        self.render(self.model, [16, 20], 0.25, 0, 3,
-                    raster_options={'background_weight': 0.2})
-        settings = self.calls[-1]['raster_settings']
-        self.assertEqual(settings['axis'], 0)
-        self.assertEqual(settings['bounds'], self.model.bounds)
-        self.assertEqual(settings['slice_idx'], 0.25)
-        self.assertEqual(settings['background_weight'], 0.2)
+class RendererTests(Stage1RendererTests):
+    pass
 
-    def test_scale_rotation_path_still_works(self):
-        result = self.render(self.model, [16, 20], 0, 2, 3)
-        self.assertIn('scales', self.calls[-1])
-        self.assertNotIn('cov3Ds_precomp', self.calls[-1])
-        self.assertEqual(set(result), {'render', 'radii', 'visibility_filter'})
 
+class LegacyGeometryTests(unittest.TestCase):
     def test_continuous_index_validation(self):
         # 运行原始校验；在进入 Tensor 几何构造时停止，不冒充几何数值测试。
         class GeometryReached(Exception): pass

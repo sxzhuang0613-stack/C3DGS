@@ -6,15 +6,9 @@
 
 需要 CUDA 版 PyTorch、兼容的 CUDA Toolkit/nvcc、NumPy、PyYAML、plyfile、torchvision、matplotlib、tqdm 和 simple-knn。`temp.py` 额外需要 nibabel；独立使用 `tools.py` 的可视化/指标功能需要 OpenCV、python-pptx、scikit-learn、Pillow。本仓库不自动安装或修改环境。
 
-先编译当前渲染扩展（不依赖旧 third_party/glm）：
-
-```bash
-cd diff-gaussian-slice-rendering
-python -m pip install --no-build-isolation .
-```
-
-渲染扩展的版本与 Python 包装必须匹配，安装细节以该目录 README 为准。
-Stage1 批量结构操作不再依赖渲染库的 `local_response.py`，也不需要额外编译 CUDA。
+Stage1 使用已安装的 `diff_gaussian_rasterization_slice` 归一化切片库，Python 包装与原生扩展必须配套。
+主项目不修改库源码、不自动安装，也不通过工作区路径替换安装包。
+本次适配范围为 `GetInitialGaussian.py`；Stage2 和独立评估入口尚未随此次变更适配或验证。
 
 ## 配置和运行
 
@@ -57,14 +51,16 @@ spacing 按本数据集的毫米约定解释，未知单位仍保留在原始元
 新模型在 spacing 定义的局部栈坐标中居中，三个轴共用 `L=max(W*sx, H*sy, max(S-1,1)*sz)/2` 缩放，病例 bounds 自动计算并同时传给初始化、Renderer 和结构优化。
 面内使用像素中心 `(u+.5-W/2)*sx`，法向使用 `(k-(S-1)/2)*sz`；单层观测位于零平面。
 配置中的 `bounds` 仅用于无几何记录的旧模型兼容。
-当前渲染为有符号加性 Gaussian 场，支持 point 和解析 Gaussian PSF 厚度响应；Preprocess 转为等效二维核。背景只加一次，不包含 opacity 合成或灰度归一化。
-`response_mode` 默认为 point；当前数据未提供逐病例 PSF，不从 spacing 推断层厚。
-gaussian 的 `psf_sigma` 使用模型坐标单位，或显式提供 `psf_std_vector`；毫米转换见渲染库 README。
+Stage1 渲染为 `I=sum(G_i*c_i)/sum(G_i)`，无有效权重时返回背景。
+`c_i` 表示局部强度，不使用 opacity 或透射率合成。新库固定使用轴向点采样及权重裁剪，
+不接受旧 `response_mode/psf_sigma/psf_std_vector/kernel_cutoff/cutoff_transition/covariance_jitter` 配置。
+模型参数保留 spacing 坐标；Renderer 用 `A=diag(1/bounds)` 变换位置和完整协方差后传入新库，
+保持像素中心、连续切片索引和单层位置定义。灰度适配为三通道，返回单通道图像。
 
 新初始化保持 50000 点，50% 分层均匀、30% 图像前景、20% 图像边缘；采样分位数图不改变训练目标。
 80% 高斯面内 sigma 为 1.25 个输出像素，20% 为 2.5 个像素；point 法向 sigma 为 0.4 倍层间距，旋转从单位四元数开始。
-初始轴比限制为 5，扩大短轴以保留覆盖。存在已知 PSF 时，从有效法向方差扣除 PSF 和固定 jitter，并保留最小内禀尺度。
-先用正式 Renderer 标定共同强度，再用最多 20 步矩阵自由 CG 拟合有符号系数，不构造全局响应矩阵，不增加正常 Adam 预热阶段。
+初始轴比限制为 5，扩大短轴以保留覆盖；法向尺度不再扣除旧 PSF 或 jitter。
+先用正式 Renderer 标定共同强度，再用最多 20 步矩阵自由 CG 拟合局部强度，不构造全局响应矩阵，不增加正常 Adam 预热阶段。
 CG 预算耗尽不等于收敛，初始化报告包含相对残差和拟合前后 MSE。病例级采样使用独立稳定种子，不消耗训练的全局随机数流。
 
 ## 保存和恢复
@@ -78,7 +74,7 @@ Stage1 每例保存：
 
 默认从完整训练状态恢复；只在迭代已完成且所需最终产物存在时跳过病例。`warm_start_ply_path` 仅用于模型参数热启动，不表示完整续训。恢复的随机状态要求使用相同数据、设备布局和实验参数；CUDA 原子累加仍可能产生非确定性。
 新 checkpoint 保存相同几何记录；恢复、测试和 Stage2 读取时核对坐标/观测条件。
-缺少几何记录的旧模型显式使用 legacy_box，不转换其参数坐标。新最终 PLY 记录缺失时，可通过完整 checkpoint 重建产物。
+Stage1 拒绝将旧加性 checkpoint 或无语义记录的 PLY 自动解释为局部强度；新记录包含 `render_model` 和 `intensity_semantics`。新最终 PLY 记录缺失时，可通过匹配的完整 checkpoint 重建产物。
 续训允许延长迭代数和改变保存频率，拒绝混用已改变的 Stage1 优化条件；初始化不会在续训时重新执行。
 评估新初始化应使用独立输出目录，或明确关闭原实验的恢复/跳过选项。
 
@@ -87,27 +83,27 @@ Stage1 每例保存：
 Stage1 默认真实切片无放回均匀采样，支持单层/双层病例。原损失权重不变，插层起点保持原实际行为的 12500 步。`max_num_pts` 默认 200000，是结构容量上限；不将低强度组织当成低贡献点剪除。
 
 Stage1 使用独立的 `Gaussians/GaussianModel_structural.py`，不继承或导入 `GaussianModel_noop.py`；
-属性、PLY、Adam、学习率和初始化入口由本模型维护。旧 noop 文件及 Stage2/评估模型保持原样，PLY 格式兼容。
+属性、PLY、Adam、学习率和初始化入口由本模型维护。Stage2/评估入口未改动；字段格式一致不代表旧幅度与新局部强度语义可直接互换。
 结构周期沿用 `densify_from_iter / densify_until_iter / densification_interval`。
 正常训练采样、损失、反向传播和 Adam 更新次序不变；几何正则继续使用固定参考容量 N0。
 
-结构操作采用 `structural_algorithm: batch_v1`：
+结构操作采用 `structural_algorithm: batch_normalized_v1`：
 
 - 用按 XYZ 体素长度换算的平均位置梯度选点，门限为绝对下限与正梯度中位数倍数的较大值。
 - 以面内投影协方差的最大标准差（输出像素单位）区分 Clone/Split，避免仅因层间 spacing 大而反复法向分裂。
-- Clone 的父子强度各减半，位置施加对称小扰动；扰动为零时严格保持加性场。
-- Split 沿对面内投影贡献最大的内禀轴生成两个对称子点，仅缩小该轴；保持未加 jitter、未截断内禀核的有符号积分、中心和二阶矩，不保证逐像素预测不变。
-- Prune 始终清理无效点；可选弱幅值裁剪只作用于已充分观测的点，默认关闭。初版不额外裁掉未观测点或仅中心越界的点，以免误删仍有支撑的核。
+- Clone 保持父点不动，只扰动新点，父子继承原局部强度；局部复制不保证归一化图像不变。
+- Split 沿对面内投影贡献最大的内禀轴生成两个对称子点，仅缩小该轴；子颜色直接继承，保留等权混合的中心与二阶矩初始化，不再补偿积分，不保证逐像素预测不变。
+- Prune 仅清理无效点；`structural_prune_peak` 必须为 0，保护参与插值的暗色点。
 - 阈值点过多时随机限流，每周期最多净增 `floor(存活点数*structural_growth_fraction)` 点，并受 `max_num_pts` 限制。没有按梯度 Top-K 排序。
 
 每周期基于同一旧模型生成全部掩码和子点，各参数/Adam 状态统一提交一次。
-保留未改旧行动量，新行动量清零；Clone 父点的位置和强度动量清零，组级 Adam step 保留。
+保留未改旧行动量，新行动量清零；Clone 父点未改变，其动量保留，组级 Adam step 保留。
 提交后清空梯度/观测统计。`max_radii2D` 仅保留 checkpoint 字段，不再每步更新。
 没有逐候选 Python 循环、Birth/Merge/Swap、局部拟合、额外渲染、SSIM 验收或回滚。
 结构调整允许短期损失上升，不保证后续迭代能够补偿全部近似误差。
 
-旧搜索器的完整 checkpoint 不能解释为 batch_v1 精确续训；请使用新输出目录，必要时通过
-`warm_start_ply_path` 加载旧 PLY，并关闭新实验的 `stage1_resume/stage1_skip_existing`。
+旧加性模型不能作为归一化 Stage1 的精确续训或直接强度热启动；默认输出目录改为独立的
+`acdc_experiment_normalized`，旧结果保留。`warm_start_ply_path` 要求匹配的新语义及几何记录。
 新版 checkpoint 保持 Adam、随机状态和统计的完整恢复。阈值定义及校准方法见
 [批量高斯阈值说明](docs/batch_gaussian_thresholds.md)。
 
@@ -126,7 +122,11 @@ python temp.py --config config_train.yaml
 ## 验证
 
 ```bash
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -p test_stage1_normalized.py -v
+python -m unittest discover -s tests -p test_structural_optimizer.py -v
+python -m unittest discover -s tests -p test_initialization.py -k InitializationTests -v
 ```
+
+本轮只验证 Stage1；历史全仓库测试还包含未适配的其他入口。
 
 测试区分不依赖 GPU 的接口/配置回归和需要 PyTorch/CUDA 扩展的数值测试；依赖不具备时后者跳过。语法和接口检查不能替代 CUDA 编译、GPU 数值验证或完整训练。

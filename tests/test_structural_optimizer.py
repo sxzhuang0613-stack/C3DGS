@@ -12,21 +12,7 @@ from torch import nn
 from config_utils import load_config
 from case_geometry import make_geometry, attach_geometry
 from Gaussians.GaussianModel_structural import GaussianModel
-from diff_gaussian_slice_rendering import GaussianRasterizationSettings as Settings
-from diff_gaussian_slice_rendering.local_response import activated_covariance
-from diff_gaussian_slice_rendering.reference import rasterize_reference
-
-
-def reference_render(model,img_size,slice_idx,axis,num_slices,**kwargs):
-    cfg = Settings.from_axis(*img_size,axis=axis,slice_idx=slice_idx,num_slices=num_slices,
-                             bounds=kwargs['bounds'],**kwargs['raster_options'])
-    cfg = Settings(cfg.image_height,cfg.image_width,cfg.slice_to_world.float().double(),
-                   background=cfg.background,covariance_jitter=cfg.covariance_jitter,
-                   response_mode=cfg.response_mode,psf_std_vector=cfg.psf_vector.float().double(),
-                   kernel_cutoff=cfg.kernel_cutoff,cutoff_transition=cfg.cutoff_transition)
-    covariance = activated_covariance(model._scaling,model._rotation)
-    image = rasterize_reference(model.get_xyz.double(),model.get_intensity.double(),covariance,cfg).to(model.get_xyz.dtype)
-    return {'render':image[0]}
+from stage1_test_support import NATIVE_AVAILABLE, activated_covariance, reference_render
 
 
 class StructuralTests(unittest.TestCase):
@@ -73,41 +59,34 @@ class StructuralTests(unittest.TestCase):
         self.assertEqual(report['clone'], 4)
         self.assertEqual(report['after'], 8)
 
-    def test_clone_preserves_signed_field_and_resets_changed_moments(self):
+    def test_clone_inherits_color_and_preserves_parent_moments(self):
         model = self.model()
-        xyz = model.get_xyz.detach().clone()
-        intensity = model.get_intensity.detach().clone()
-        scaling_moment = model.optimizer.state[model._scaling]['exp_avg'].clone()
-        cfg = Settings.from_axis(9, 11, num_slices=1, bounds=model.bounds)
-        before = rasterize_reference(model.get_xyz.double(), model.get_intensity.double(),
-                                     activated_covariance(model._scaling, model._rotation), cfg)
+        old = {key: getattr(model,key).detach().clone()
+               for key in ('_xyz','_intensity','_scaling','_rotation')}
+        moments = {key:model.optimizer.state[getattr(model,key)]['exp_avg'].clone() for key in old}
         report = self.step(model)
         self.assertEqual(report['split'], 0)
-        torch.testing.assert_close(model.get_xyz, torch.cat((xyz, xyz)))
-        torch.testing.assert_close(model.get_intensity, torch.cat((intensity, intensity))*.5)
-        after = rasterize_reference(model.get_xyz.double(), model.get_intensity.double(),
-                                    activated_covariance(model._scaling, model._rotation), cfg)
-        torch.testing.assert_close(after, before, atol=1e-12, rtol=1e-12)
-        for name in ('_xyz', '_intensity'):
-            self.assertEqual(torch.count_nonzero(model.optimizer.state[getattr(model, name)]['exp_avg']), 0)
-        torch.testing.assert_close(model.optimizer.state[model._scaling]['exp_avg'][:4], scaling_moment)
-        self.assertEqual(model.geometry_reference_count, 4)
-        self.assertEqual(model.denom.sum(), 0)
-        self.assertEqual(model.optimizer.state[model._xyz]['step'], 7)
+        for key, value in old.items():
+            torch.testing.assert_close(getattr(model,key), torch.cat((value,value)))
+            actual = model.optimizer.state[getattr(model,key)]['exp_avg']
+            torch.testing.assert_close(actual[:4],moments[key])
+            self.assertEqual(torch.count_nonzero(actual[4:]),0)
+        self.assertEqual(model.geometry_reference_count,4)
+        self.assertEqual(model.denom.sum(),0)
+        self.assertEqual(model.optimizer.state[model._xyz]['step'],7)
 
-    def test_split_conserves_intrinsic_signed_mass_center_and_covariance(self):
+    def test_split_inherits_color_and_preserves_geometric_moments(self):
         model = self.model(scales=(.3, .1, .5))
         with torch.no_grad():
             model._rotation.copy_(torch.tensor([[.8, .2, .3, .4]]).repeat(4, 1))
         parent_xyz = model.get_xyz.detach().double().clone()
         parent_cov = activated_covariance(model._scaling, model._rotation).clone()
-        mass = model.get_intensity[:, 0].double()*model.get_scaling.double().prod(-1)
+        intensity = model.get_intensity.detach().clone()
         report = self.step(model)
         self.assertEqual(report['split'], 4)
         positions = model.get_xyz.double().reshape(4, 2, 3)
         torch.testing.assert_close(positions.mean(1), parent_xyz)
-        child_mass = (model.get_intensity[:, 0].double()*model.get_scaling.double().prod(-1)).reshape(4, 2)
-        torch.testing.assert_close(child_mass.sum(1), mass, rtol=1e-6, atol=1e-8)
+        torch.testing.assert_close(model.get_intensity, intensity.repeat_interleave(2,0))
         cov = activated_covariance(model._scaling, model._rotation).reshape(4, 2, 3, 3)
         offset = positions-parent_xyz[:, None]
         torch.testing.assert_close((cov+offset[..., :, None]*offset[..., None, :]).mean(1),
@@ -119,7 +98,7 @@ class StructuralTests(unittest.TestCase):
         model = self.model(scales=(.05, .05, .8))
         self.assertEqual(self.step(model)['clone'], 4)
 
-    def test_capacity_random_selection_and_symmetric_clone_mapping(self):
+    def test_capacity_random_selection_and_child_clone_mapping(self):
         self.args.max_num_pts = 6
         self.args.structural_clone_jitter = .1
         model = self.model()
@@ -128,27 +107,23 @@ class StructuralTests(unittest.TestCase):
         report = self.step(model)
         self.assertEqual((report['clone'], report['after']), (2, 6))
         children = model.get_intensity[4:, 0]
-        parents = torch.stack([torch.where(intensity[:, 0] == value*2)[0][0] for value in children])
-        torch.testing.assert_close(model.get_xyz[parents]+model.get_xyz[4:], 2*xyz[parents])
-        for key in ('_xyz', '_intensity'):
-            state = model.optimizer.state[getattr(model, key)]['exp_avg']
-            self.assertEqual(torch.count_nonzero(state[parents]), 0)
-            untouched = torch.ones(4, dtype=torch.bool); untouched[parents] = False
-            self.assertGreater(torch.count_nonzero(state[:4][untouched]), 0)
+        parents = torch.stack([torch.where(intensity[:, 0] == value)[0][0] for value in children])
+        torch.testing.assert_close(model.get_xyz[:4],xyz)
+        self.assertTrue((model.get_xyz[4:] != xyz[parents]).any())
+        for key in ('_xyz','_intensity'):
+            state = model.optimizer.state[getattr(model,key)]['exp_avg']
+            self.assertGreater(torch.count_nonzero(state[:4]),0)
+            self.assertEqual(torch.count_nonzero(state[4:]),0)
 
-    def test_prune_grace_minimum_and_state_alignment(self):
-        self.args.structural_prune_peak = .1
+    def test_dark_and_unobserved_points_are_not_pruned(self):
         self.args.structural_growth_fraction = 0.
         model = self.model()
         with torch.no_grad():model._intensity[:2] = 0.
-        model.denom[1] = 0  # 未充分观测的新点不参与弱贡献裁剪。
+        model.denom[1] = 0
+        before = model._xyz
         report = self.step(model)
-        self.assertEqual(report['pruned'], 1)
-        self.assertEqual(report['after'], 3)
-        expected = torch.tensor([[2., 2., 2.], [3., 3., 3.], [4., 4., 4.]])
-        torch.testing.assert_close(model.optimizer.state[model._xyz]['exp_avg'], expected)
-        model._intensity.data.zero_();model.denom.fill_(1.)
-        self.assertEqual(self.step(model)['after'], 1)
+        self.assertEqual((report['pruned'], report['after']), (0,4))
+        self.assertIs(model._xyz,before)
 
     def test_invalid_point_is_removed_without_normalizing_bad_rotation(self):
         model = self.model()
@@ -200,7 +175,7 @@ class StructuralTests(unittest.TestCase):
     def test_voxel_gradient_and_pixel_scale_are_coordinate_scale_invariant(self):
         first, second = self.model(), self.model()
         geometry = dict(second.geometry, scale_mm=second.geometry['scale_mm']/2,
-                        bounds=[value*2 for value in second.bounds])
+                        bounds=[value for value in second.bounds])
         attach_geometry(second, geometry)
         with torch.no_grad():
             second._xyz.mul_(2)
@@ -219,11 +194,10 @@ class StructuralTests(unittest.TestCase):
 
     def test_mixed_clone_split_prune_commits_aligned_states_once(self):
         self.args.max_num_pts = 6
-        self.args.structural_prune_peak = .1
         model = self.model()
         with torch.no_grad():
             model._scaling[[1, 3]] = torch.tensor([.3, .1, .2]).log()
-            model._intensity[0] = 0.
+            model._xyz[0] = float('nan')
         with mock.patch.object(model, '_replace_structure', wraps=model._replace_structure) as commit:
             report = self.step(model)
         self.assertEqual(commit.call_count, 1)
@@ -244,7 +218,7 @@ class StructuralTests(unittest.TestCase):
         self.assertEqual(self.step(model)['selected'], 0)
 
     def test_short_cuda_render_update_structure_update(self):
-        if not torch.cuda.is_available():self.skipTest('需要 CUDA')
+        if not torch.cuda.is_available() or not NATIVE_AVAILABLE:self.skipTest('需要 CUDA 与新库')
         from Renderer import render
         model = self.model(scales=(.3, .1, .2), device='cuda')
         for iteration in range(4):

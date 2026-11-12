@@ -1,6 +1,7 @@
 import os
 import torch
 from Gaussians.GaussianModel_structural import GaussianModel
+from Gaussians.utils import covariance_from_scaling_rotation
 from Dataloader import dataset
 from CostFunctions import l1_loss, ssim, anisotropic_scale_loss
 from Renderer import render
@@ -56,6 +57,7 @@ def reconstruct_full_case(Gaussians, s, h, w, out_dir, iter_num, include_interp,
     os.makedirs(rec_dir, exist_ok=True)
     
     with torch.no_grad():
+        covariance = covariance_from_scaling_rotation(Gaussians.get_scaling, Gaussians._rotation)
         if include_interp:
             # 自动计算插帧序列：例如 s=10, step=0.5，则生成 0.0, 0.5, 1.0 ... 9.0
             num_steps = int((s - 1) / step_size) + 1
@@ -68,7 +70,8 @@ def reconstruct_full_case(Gaussians, s, h, w, out_dir, iter_num, include_interp,
             
         
         for idx in slice_indices:
-            render_pkg = render(Gaussians, img_size=[h, w], slice_idx=idx, axis=2, num_slices=s, **render_kwargs)
+            render_pkg = render(Gaussians, img_size=[h, w], slice_idx=idx, axis=2,
+                                num_slices=s, covariance=covariance, **render_kwargs)
             pred_tensor = render_pkg['render'].clamp(0, 1).cpu().numpy()
             
             # 命名支持浮点数：如 slice_000.00.png, slice_000.50.png
@@ -97,8 +100,12 @@ def save_training_checkpoint(path, gaussians, iteration, history_iters, history_
     os.replace(path + '.tmp', path)
 
 def restore_training_checkpoint(state, gaussians, args):
-    if state.get('geometry') is not None:
-        attach_geometry(gaussians,state['geometry'])
+    check_resume_config(state['config'], args)
+    geometry = state.get('geometry')
+    if (geometry is None or geometry.get('render_model') != args.render_model
+            or geometry.get('intensity_semantics') != 'local_value'):
+        raise ValueError('checkpoint 缺少匹配的归一化渲染记录，不能恢复为新模型')
+    attach_geometry(gaussians,geometry)
     for name, tensor in state['parameters'].items():
         setattr(gaussians, name, torch.nn.Parameter(tensor.to(args.device)))
     gaussians.geometry_reference_count = state.get('geometry_reference_count',len(gaussians.get_xyz))
@@ -112,9 +119,11 @@ def restore_training_checkpoint(state, gaussians, args):
     torch.cuda.set_rng_state_all([value.cpu() for value in state['cuda']])
 
 def check_resume_config(saved, args):
-    # 旧结构搜索器与批量统计的单位不同，不能把旧状态解释为精确续训。
+    # 加性幅度与局部强度语义不同，不自动转换旧参数或 Adam 状态。
+    if saved.get('render_model') != args.render_model:
+        raise ValueError('渲染模型已改变，不能完整续训；请使用新的实验输出目录')
     if saved.get('structural_algorithm') != args.structural_algorithm:
-        raise ValueError('结构算法已改变，不能完整续训；请使用独立输出目录和 PLY 参数热启动')
+        raise ValueError('结构算法已改变，不能完整续训；请使用新的实验输出目录')
     # 允许延长训练和改变输出频率；优化目标或 Adam 参数改变时应参数热启动。
     keys = ('position_lr_init','position_lr_final','position_lr_max_steps','position_lr_delay_mult',
             'intensity_lr','scaling_lr','rotation_lr','adam_eps','adam_betas',
@@ -122,7 +131,8 @@ def check_resume_config(saved, args):
             'interpolate_iter','interpolation_probability','interpolation_alpha_min',
             'interpolation_alpha_max','anisotropic_max_ratio','anisotropic_epsilon',
             'densify_from_iter','densify_until_iter','densification_interval','max_num_pts',
-            'lambda_l1','lambda_ssim','lambda_anisotropic','lambda_interp_l1','lambda_interp_ssim')
+            'lambda_l1','lambda_ssim','lambda_anisotropic','lambda_interp_l1','lambda_interp_ssim',
+            'background','raster_debug')
     keys = set(keys)|{key for key in vars(args) if key.startswith('structural_')}
     changed = sorted(key for key in keys if key in saved and saved[key] != getattr(args,key))
     if changed:
@@ -161,16 +171,12 @@ def training(args):
         if state is not None and (args.stage1_resume or skip_existing):
             geometry = state.get('geometry')
             if geometry is None:
-                # 无几何记录的旧 checkpoint 继续使用旧盒子，不解释为 spacing 坐标。
-                old_args = argparse.Namespace(**state['config'])
-                geometry = make_geometry(data['info']['spacing_xyz'][0],imgs.shape,old_args,legacy=True)
-                tqdm.write(f'[{sample_name}] 旧 checkpoint：保留 legacy_box 坐标。')
+                raise ValueError('旧 checkpoint 缺少渲染和几何记录，不能按归一化模型恢复')
         elif args.warm_start_ply_path:
             record = read_model_geometry(args.warm_start_ply_path)
-            geometry = record['geometry'] if record else make_geometry(
-                data['info']['spacing_xyz'][0],imgs.shape,args,legacy=True)
             if record is None:
-                tqdm.write(f'[{sample_name}] 无几何记录的旧 PLY：保留 legacy_box 坐标。')
+                raise ValueError('PLY 缺少局部强度及渲染语义记录，不能自动解释为归一化模型')
+            geometry = record['geometry']
         else:
             geometry = make_geometry(data['info']['spacing_xyz'][0],imgs.shape,args)
         current = make_geometry(data['info']['spacing_xyz'][0],imgs.shape,args,legacy=geometry['version']==0)
@@ -208,9 +214,11 @@ def training(args):
                     desc=f'Case [{sample_idx + 1}/{len(loader)}] {sample_name}')
         for iteration in pbar:
             gaussians.update_learning_rate(iteration)
+            # 同一优化步的真实切片与插层共享几何图；更新参数后下一步重新构造。
+            covariance = covariance_from_scaling_rotation(gaussians.get_scaling, gaussians._rotation)
             # 无放回均匀采样，单层和双层病例也能获得真实监督。
             indices = random.sample(range(s), min(s, args.real_slices_per_iter))
-            outputs = [render(gaussians, [h, w], index, 2, s, **rendering)
+            outputs = [render(gaussians, [h, w], index, 2, s, covariance=covariance, **rendering)
                        for index in indices]
             predictions = torch.stack([output['render'] for output in outputs])[:, None]
             targets = imgs[indices, None]
@@ -230,14 +238,15 @@ def training(args):
                     interp_outputs, interp_targets = [], []
                     for index in intervals:
                         interp_outputs.append(render(
-                            gaussians, [h, w], index + alpha, 2, s, **rendering)['render'])
+                            gaussians, [h, w], index + alpha, 2, s,
+                            covariance=covariance, **rendering)['render'])
                         interp_targets.append((1 - alpha) * imgs[index] + alpha * imgs[index + 1])
                     interp_pred = torch.stack(interp_outputs)[:, None]
                     interp_gt = torch.stack(interp_targets)[:, None]
                 else:
                     index = random.randrange(s)
                     interp_pred = render(gaussians, [h, w], index, 2, s,
-                                         **rendering)['render'][None, None]
+                                         covariance=covariance, **rendering)['render'][None, None]
                     interp_gt = imgs[index][None, None]
                 loss_interp_l1 = l1_loss(interp_pred, interp_gt)
                 loss_interp_ssim = 1 - ssim(interp_pred, interp_gt, **similarity)

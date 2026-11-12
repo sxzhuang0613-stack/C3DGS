@@ -1,5 +1,7 @@
 # 开发记录
 
+- [2026-11-11：Stage1 接入归一化切片与高斯操作适配](2026-11-11-stage1-normalized-adaptation.md)
+
 - [2026-11-11：切片库改为归一化高斯平均](2026-11-11-normalized-slice-average.md)
 
 - [2026-11-11：Stage1 批量高斯操作与模型解耦](2026-11-11-batch-gaussian-operations.md)

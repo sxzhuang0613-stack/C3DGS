@@ -7,6 +7,9 @@ from pathlib import Path
 import yaml
 
 
+RENDER_MODEL = "normalized_slice_v1"
+
+
 def load_config(path):
     # 拒绝重复键，避免同一实验参数被后面的值静默覆盖。
     class UniqueLoader(yaml.SafeLoader):
@@ -26,11 +29,18 @@ def load_config(path):
     with config_path.open(encoding='utf-8') as stream:
         values = yaml.load(stream, Loader=UniqueLoader)
     values.setdefault('dataset_name', 'acdc')
+    values.setdefault('render_model', RENDER_MODEL)
     if not 0 <= values['train_fraction'] <= 1 or values['reference_phase'] < 0:
         raise ValueError('病例划分比例或参考相位非法')
     if len(values['bounds']) != 3 or any(value <= 0 for value in values['bounds']):
         raise ValueError('bounds 必须为三个正半边长')
     if 'iters' in values:
+        if values['render_model'] != RENDER_MODEL:
+            raise ValueError('Stage1 仅支持 normalized_slice_v1 渲染模型')
+        obsolete = set(values) & {'response_mode', 'psf_sigma', 'psf_std_vector',
+                                  'kernel_cutoff', 'cutoff_transition', 'covariance_jitter'}
+        if obsolete:
+            raise ValueError(f'新库不支持这些旧渲染配置，请移除：{sorted(obsolete)}')
         for key in ('iters', 'checkpoint_interval', 'loss_plot_interval', 'status_interval',
                     'real_slices_per_iter', 'num_pts', 'interp_step_size',
                     'stage2_iters', 'stage2_save_interval', 'stage2_loss_plot_interval',
@@ -57,8 +67,10 @@ def load_config(path):
             raise ValueError('结构容量需要 1 <= min_points <= num_pts <= max_num_pts')
         if not 0 < values['structural_split_fraction'] < 1:
             raise ValueError('structural_split_fraction 必须在 (0,1) 内')
-        if values['structural_algorithm'] != 'batch_v1':
-            raise ValueError('当前 Stage1 仅支持 structural_algorithm=batch_v1')
+        if values['structural_algorithm'] != 'batch_normalized_v1':
+            raise ValueError('当前 Stage1 仅支持 structural_algorithm=batch_normalized_v1')
+        if values['structural_prune_peak'] != 0:
+            raise ValueError('归一化平均不能按低强度剪枝，structural_prune_peak 必须为 0')
         for key in ('structural_grad_threshold', 'structural_grad_multiplier',
                     'structural_clone_jitter', 'structural_prune_peak'):
             if not isinstance(values[key], (int, float)) or not math.isfinite(values[key]) or values[key] < 0:
@@ -119,12 +131,6 @@ def dataset_options(args):
 def render_options(args):
     return dict(bounds=args.bounds, raster_options={
         'background': args.background,
-        'response_mode': args.response_mode,
-        'psf_sigma': args.psf_sigma,
-        'psf_std_vector': args.psf_std_vector,
-        'kernel_cutoff': args.kernel_cutoff,
-        'cutoff_transition': args.cutoff_transition,
-        'covariance_jitter': args.covariance_jitter,
         'debug': args.raster_debug,
     })
 

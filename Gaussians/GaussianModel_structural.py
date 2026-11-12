@@ -8,8 +8,7 @@ from torch import nn
 import torch.nn.functional as F
 from plyfile import PlyData, PlyElement
 
-from .utils import get_expon_lr_func
-from diff_gaussian_slice_rendering import normalize_rotations
+from .utils import get_expon_lr_func, normalize_rotations, quaternion_rotation_matrix
 
 
 class GaussianModel:
@@ -105,11 +104,7 @@ class GaussianModel:
 
     @staticmethod
     def _rotation_matrix(raw):
-        # 与渲染器使用同一 wxyz 激活；不依赖旧模型或硬编码 CUDA 的 utils.build_rotation。
-        w, x, y, z = normalize_rotations(raw).unbind(-1)
-        return torch.stack((1-2*(y*y+z*z), 2*(x*y-w*z), 2*(x*z+w*y),
-                            2*(x*y+w*z), 1-2*(x*x+z*z), 2*(y*z-w*x),
-                            2*(x*z-w*y), 2*(y*z+w*x), 1-2*(x*x+y*y)), -1).reshape(-1, 3, 3)
+        return quaternion_rotation_matrix(raw)
 
     def _invalid_point_mask(self):
         invalid = torch.zeros(len(self._xyz), device=self._xyz.device, dtype=torch.bool)
@@ -199,17 +194,11 @@ class GaussianModel:
         axis_logs = self._scaling[valid_ids].gather(1, split_axes[:, None])[:, 0]
         can_split = axis_logs + math.log(shrink) >= args.log_scale_min
         high &= (sigma_pixels <= args.structural_split_sigma_pixels) | can_split
-        # 弱幅值裁剪默认关闭；开启后只裁掉已充分观测的点，不把强度视作 opacity。
-        weak = observed & (self._intensity[valid_ids, 0].abs() < args.structural_prune_peak)
-        max_prune = len(valid_ids)-args.structural_min_points
-        weak_ids = torch.where(weak)[0]
-        if len(weak_ids) > max_prune:
-            weak.zero_()
-            weak[weak_ids[torch.randperm(len(weak_ids), device=self._xyz.device)[:max_prune]]] = True
+        # 颜色是局部强度；暗色点也参与分母，不能按幅值删除。
         # 阈值选出的点只在超容量/增长预算时随机限流，不按梯度 Top-K 排序。
-        candidates = torch.where(high & ~weak)[0]
+        candidates = torch.where(high)[0]
         above_threshold = len(candidates)
-        kept_count = len(valid_ids)-int(weak.sum())
+        kept_count = len(valid_ids)
         capacity = max(0, args.max_num_pts-kept_count)
         growth_limit = int(kept_count*args.structural_growth_fraction)
         budget = min(capacity, growth_limit)
@@ -219,28 +208,19 @@ class GaussianModel:
         clone_local = candidates[sigma_pixels[candidates] <= args.structural_split_sigma_pixels]
         split_ids, clone_ids = valid_ids[split_local], valid_ids[clone_local]
         removed = invalid.clone()
-        removed[valid_ids[weak]] = True
         removed[split_ids] = True
         survivors = torch.where(~removed)[0]
         sources = torch.cat((clone_ids, split_ids.repeat_interleave(2)))
-        pruned_amplitude = self._intensity[valid_ids[weak]].abs().sum()
         changed = bool(removed.any()) or len(sources) > 0
         if changed:
             data = {key: torch.cat((getattr(self, name)[survivors], getattr(self, name)[sources]), 0)
                     for key, name in self.parameter_names.items()}
-            clone_rows = torch.zeros(len(survivors), device=self._xyz.device, dtype=torch.bool)
-            rows = torch.searchsorted(survivors, clone_ids)
-            clone_rows[rows] = True
-            # Clone 对父/子施加对称小扰动并均分强度；无扰动时严格保持加性场。
+            # Clone 仅扰动新点；父点参数和动量不变，颜色直接继承。
             if len(clone_ids):
                 clone_rotation = rotation[clone_local]
                 offset = torch.randn_like(self._xyz[clone_ids]) * scales[clone_local] * args.structural_clone_jitter
                 offset = (clone_rotation @ offset[:, :, None]).squeeze(-1)
-                # survivors 与 clone_ids 顺序不同，显式映射避免随机限流后配错父点。
-                data['xyz'][rows] -= offset
                 data['xyz'][len(survivors):len(survivors)+len(clone_ids)] += offset
-                data['intensity'][rows] *= .5
-                data['intensity'][len(survivors):len(survivors)+len(clone_ids)] *= .5
             if len(split_ids):
                 # 选择对面内 footprint 贡献最大的局部轴，避免仅因层厚大而沿法向反复分裂。
                 axes = split_axes[split_local]
@@ -254,17 +234,14 @@ class GaussianModel:
                 # 一轴矩匹配：sigma_child² + displacement² = sigma_parent²。
                 child_logs = data['scaling'][tail:].reshape(-1, 2, 3)
                 child_logs[rows[:, None], torch.arange(2, device=self._xyz.device)[None, :], axes[:, None]] += math.log(shrink)
-                # 保持未加 jitter、未截断内禀 Gaussian 的有符号积分；并非逐像素不变。
-                data['intensity'][tail:] /= 2*shrink
-            self._replace_structure(survivors, sources, data,
-                                    reset={'xyz': clone_rows, 'intensity': clone_rows})
+                # 子点继承局部强度，不进行加性场的积分幅度补偿。
+            self._replace_structure(survivors, sources, data)
         self._reset_statistics()
         report = dict(before=before, after=len(self._xyz), clone=len(clone_ids), split=len(split_ids),
                       pruned=int(removed.sum())-len(split_ids), eligible=int(eligible.sum()),
                       above_threshold=above_threshold, selected=len(candidates), budget=budget,
                       grad_median=float(median), grad_threshold=float(threshold),
-                      sigma_pixels_median=float(sigma_pixels.median()),
-                      pruned_abs_amplitude=float(pruned_amplitude))
+                      sigma_pixels_median=float(sigma_pixels.median()))
         print(f'[Structure {iteration}] {report}')
         return report
 

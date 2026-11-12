@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from config_utils import render_options
+from config_utils import render_options, RENDER_MODEL
 
 
 def make_geometry(spacing_xyz, shape_shw, args, legacy=False):
@@ -22,6 +22,8 @@ def make_geometry(spacing_xyz, shape_shw, args, legacy=False):
                 spacing_unit='mm_assumed_from_dataset', spacing_xyz=spacing.tolist(),
                 shape_shw=[slices,height,width], scale_mm=None if legacy else scale,
                 bounds=bounds, reference_phase=args.reference_phase,
+                render_model=getattr(args, 'render_model', RENDER_MODEL),
+                intensity_semantics='local_value',
                 normalization_epsilon=args.normalization_epsilon, rendering=rendering)
 
 
